@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireAuthenticated } from "@/lib/auth";
 import { getOpenAIImageSize } from "@/lib/generativeOptions";
-import { chooseImageModel, requestImageEdit, requestImageGeneration } from "@/lib/openaiImageApi";
+import { OpenAIImageApiError, chooseImageModel, requestImageEdit, requestImageGeneration } from "@/lib/openaiImageApi";
 import { isTransparentOutput } from "@/lib/promptBuilder";
 import { prepareServerPng } from "@/lib/serverImageProcessing";
 import type { GeneratedPrompt, PngValidationStatus } from "@/lib/generativeTypes";
@@ -139,6 +139,22 @@ export async function POST(request: Request) {
       }
     });
   } catch (error) {
+    if (error instanceof OpenAIImageApiError) {
+      return NextResponse.json(
+        {
+          error: error.message,
+          errorCode: getClientImageErrorCode(error),
+          errorParam: error.details.param,
+          errorType: error.details.type,
+          developerMessage: error.details.message,
+          endpoint: error.endpoint,
+          openAIStatus: error.details.status,
+          retryable: error.retryable
+        },
+        { status: error.details.status ?? 502 }
+      );
+    }
+
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "이미지 생성 중 오류가 발생했습니다." },
       { status: 500 }
@@ -208,4 +224,14 @@ function getValidationFailureMessage(status: PngValidationStatus) {
 function getTransparentReminder(model: string) {
   void model;
   return transparentFinalReminder;
+}
+
+function getClientImageErrorCode(error: OpenAIImageApiError) {
+  const messageCode = error.message.match(/^([A-Z0-9_]+):/)?.[1];
+
+  if (messageCode) {
+    return messageCode;
+  }
+
+  return error.details.code?.toUpperCase() ?? "IMAGE_API_ERROR";
 }

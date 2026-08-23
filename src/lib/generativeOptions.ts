@@ -1,5 +1,7 @@
 import type { CandidateId, ImageSize, OutputType } from "@/lib/generativeTypes";
 
+export type OpenAIImageSize = "1024x1024" | "1024x1536" | "1536x1024";
+
 export const outputOrder: OutputType[] = ["decorated-title", "title-only", "icons-only"];
 export const candidateOrder: CandidateId[] = ["option-1", "option-2"];
 
@@ -38,14 +40,22 @@ export function parseImageSize(size: ImageSize) {
   return { width: option.width, height: option.height };
 }
 
-export function getOpenAIImageSize(size: ImageSize) {
-  if (size === "1500x1500") {
-    return "1024x1024";
+export function getOpenAIImageSize(size: ImageSize): OpenAIImageSize;
+export function getOpenAIImageSize(width: number, height: number): OpenAIImageSize;
+export function getOpenAIImageSize(sizeOrWidth: ImageSize | number, height?: number): OpenAIImageSize {
+  const dimensions =
+    typeof sizeOrWidth === "number"
+      ? { width: sizeOrWidth, height: height ?? sizeOrWidth }
+      : parseImageSize(sizeOrWidth);
+  const ratio = dimensions.width / dimensions.height;
+
+  if (ratio > 1.15) {
+    return "1536x1024";
   }
 
-  if (size === "1500x416") {
-    return "1536x512";
+  if (ratio < 0.87) {
+    return "1024x1536";
   }
 
-  return "1536x752";
+  return "1024x1024";
 }

@@ -1,3 +1,11 @@
+export type OpenAIErrorDetails = {
+  status?: number;
+  code?: string;
+  param?: string;
+  type?: string;
+  message?: string;
+};
+
 export function getOpenAIErrorMessage(data: unknown, fallback: string) {
   const message = (data as { error?: { message?: string; code?: string; type?: string } }).error?.message;
   const code = (data as { error?: { code?: string } }).error?.code;
@@ -7,15 +15,34 @@ export function getOpenAIErrorMessage(data: unknown, fallback: string) {
 }
 
 export function getOpenAIErrorForUser(error: unknown, fallback: string) {
-  const code =
-    typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
-  const status =
-    typeof error === "object" && error !== null && "status" in error && typeof error.status === "number"
-      ? error.status
-      : undefined;
-  const message = error instanceof Error ? error.message : fallback;
+  const details = getOpenAIErrorDetails(error);
+  const code = details.code;
+  const status = details.status;
+  const message = details.message ?? (error instanceof Error ? error.message : fallback);
 
   return normalizeOpenAIError(message, code, fallback, status);
+}
+
+export function getOpenAIErrorDetails(error: unknown): OpenAIErrorDetails {
+  const record = toRecord(error);
+  const nested = toRecord(record?.error);
+  const details: OpenAIErrorDetails = {
+    status: readNumber(record, "status") ?? readNumber(nested, "status"),
+    code: readString(record, "code") ?? readString(nested, "code"),
+    param: readString(record, "param") ?? readString(nested, "param"),
+    type: readString(record, "type") ?? readString(nested, "type"),
+    message: readString(nested, "message") ?? (error instanceof Error ? error.message : undefined)
+  };
+
+  return Object.fromEntries(Object.entries(details).filter(([, value]) => value !== undefined)) as OpenAIErrorDetails;
+}
+
+export function isRetryableOpenAIError(details: OpenAIErrorDetails) {
+  if (details.status === 429 || (typeof details.status === "number" && details.status >= 500)) {
+    return true;
+  }
+
+  return details.code === "rate_limit_exceeded" || details.code === "server_error";
 }
 
 export function normalizeOpenAIError(message: string, code?: string, fallback = "OpenAI API 요청에 실패했습니다.", status?: number) {
@@ -66,4 +93,18 @@ export function normalizeOpenAIError(message: string, code?: string, fallback = 
   }
 
   return fallback;
+}
+
+function toRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
+function readString(record: Record<string, unknown> | undefined, key: string) {
+  const value = record?.[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function readNumber(record: Record<string, unknown> | undefined, key: string) {
+  const value = record?.[key];
+  return typeof value === "number" ? value : undefined;
 }

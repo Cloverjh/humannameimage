@@ -87,11 +87,25 @@ type FlowState =
   | "complete";
 type ResultStatus = "idle" | "generating" | "success" | "error";
 
+type ImageErrorDetails = {
+  errorCode?: string;
+  errorParam?: string;
+  errorType?: string;
+  errorDetail?: string;
+  endpoint?: string;
+  openAIStatus?: number;
+  retryable?: boolean;
+};
+
 type ImageResult = {
   outputType: OutputType;
   status: ResultStatus;
   image?: GeneratedImage;
   error?: string;
+} & ImageErrorDetails;
+
+type ClientImageRequestError = Error & {
+  imageDetails?: ImageErrorDetails;
 };
 
 type CandidateResult = {
@@ -678,7 +692,8 @@ export function GenerativeImageStudio() {
         [outputType]: {
           outputType,
           status: "error",
-          error: caught instanceof Error ? caught.message : `${outputTypeLabelMap[outputType]} 재생성에 실패했습니다.`
+          error: caught instanceof Error ? caught.message : `${outputTypeLabelMap[outputType]} 재생성에 실패했습니다.`,
+          ...getClientImageErrorDetails(caught)
         }
       }));
     } finally {
@@ -1516,7 +1531,8 @@ async function requestDerivative(promptSet: GeneratedPromptSet, outputType: Outp
     return {
       outputType,
       status: "error" as const,
-      error: caught instanceof Error ? caught.message : `${outputTypeLabelMap[outputType]} 생성에 실패했습니다.`
+      error: caught instanceof Error ? caught.message : `${outputTypeLabelMap[outputType]} 생성에 실패했습니다.`,
+      ...getClientImageErrorDetails(caught)
     };
   }
 }
@@ -1540,14 +1556,54 @@ async function requestImage(promptSet: GeneratedPromptSet, outputType: OutputTyp
 
   if (!response.ok) {
     const status = data.status as PngValidationStatus | undefined;
-    throw new Error(
+    const error = new Error(
       status === "CHECKERBOARD_DETECTED"
         ? checkerboardFailureMessage
         : data.error ?? `${outputTypeLabelMap[outputType]} 생성에 실패했습니다.`
-    );
+    ) as ClientImageRequestError;
+    error.imageDetails = getImageErrorDetailsFromResponse(data);
+    throw error;
   }
 
   return data.image as GeneratedImage;
+}
+
+function getClientImageErrorDetails(caught: unknown): ImageErrorDetails {
+  if (typeof caught === "object" && caught !== null && "imageDetails" in caught) {
+    const details = (caught as ClientImageRequestError).imageDetails;
+    return details ?? {};
+  }
+
+  return {};
+}
+
+function getImageErrorDetailsFromResponse(data: unknown): ImageErrorDetails {
+  const record = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : {};
+
+  return {
+    errorCode: readString(record, "errorCode"),
+    errorParam: readString(record, "errorParam"),
+    errorType: readString(record, "errorType"),
+    errorDetail: readString(record, "developerMessage"),
+    endpoint: readString(record, "endpoint"),
+    openAIStatus: readNumber(record, "openAIStatus"),
+    retryable: readBoolean(record, "retryable")
+  };
+}
+
+function readString(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function readNumber(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  return typeof value === "number" ? value : undefined;
+}
+
+function readBoolean(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  return typeof value === "boolean" ? value : undefined;
 }
 
 async function requestActualIcons(imageDataUrl: string, specs: IconSpec[], sourceImageId?: string) {
@@ -2173,6 +2229,10 @@ function FinalResultCard({
 }) {
   const label = outputTypeLabelMap[result.outputType];
   const canDownload = isValidTransparentImage(result.image);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const hasErrorDetails = Boolean(
+    result.error || result.errorCode || result.errorParam || result.errorType || result.errorDetail || result.endpoint || result.openAIStatus
+  );
 
   return (
     <article className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -2182,7 +2242,15 @@ function FinalResultCard({
         ) : result.status === "generating" ? (
           <p className="text-sm font-extrabold text-slate-500">투명 PNG 생성 중...</p>
         ) : result.status === "error" ? (
-          <p className="px-4 text-center text-sm font-bold leading-6 text-red-600">{result.error}</p>
+          <div className="max-w-sm px-4 text-center">
+            <p className="text-sm font-black text-slate-900">{label}</p>
+            <p className="mt-2 text-sm font-extrabold text-red-600">생성에 실패했습니다.</p>
+            {result.errorCode ? (
+              <p className="mt-2 text-xs font-bold text-slate-500">
+                오류 코드: <span className="text-red-600">{result.errorCode}</span>
+              </p>
+            ) : null}
+          </div>
         ) : (
           <p className="text-sm font-bold text-slate-400">시안 선택 후 생성됩니다.</p>
         )}
@@ -2213,14 +2281,46 @@ function FinalResultCard({
         >
           PNG 다운로드
         </ActionButton>
-        {result.status === "error" && onRetry ? (
-          <div className="flex flex-wrap gap-2">
-            <ActionButton onClick={onRetry}>자동 보정</ActionButton>
-            <ActionButton onClick={onRetry}>다시 생성</ActionButton>
+        {result.status === "error" ? (
+          <div className="space-y-2">
+            <div className="flex flex-wrap gap-2">
+              {onRetry ? <ActionButton onClick={onRetry}>다시 생성</ActionButton> : null}
+              {hasErrorDetails ? (
+                <ActionButton onClick={() => setDetailsOpen((current) => !current)}>
+                  오류 상세 {detailsOpen ? "숨기기" : "보기"}
+                </ActionButton>
+              ) : null}
+            </div>
+            {result.retryable === false ? (
+              <p className="text-xs font-bold text-slate-400">요청 파라미터 오류는 자동 재시도하지 않았습니다.</p>
+            ) : null}
+            {detailsOpen ? <ImageErrorDetailsPanel result={result} /> : null}
           </div>
         ) : null}
       </div>
     </article>
+  );
+}
+
+function ImageErrorDetailsPanel({ result }: { result: ImageResult }) {
+  const rows = [
+    ["endpoint", result.endpoint],
+    ["openAIStatus", result.openAIStatus],
+    ["code", result.errorCode],
+    ["param", result.errorParam],
+    ["type", result.errorType],
+    ["message", result.error],
+    ["developerMessage", result.errorDetail]
+  ].filter(([, value]) => value !== undefined && value !== "");
+
+  return (
+    <div className="rounded-lg border border-red-100 bg-red-50 p-3 text-xs leading-5 text-red-900">
+      {rows.map(([label, value]) => (
+        <p key={String(label)}>
+          <span className="font-black">{label}:</span> <span className="font-semibold">{String(value)}</span>
+        </p>
+      ))}
+    </div>
   );
 }
 

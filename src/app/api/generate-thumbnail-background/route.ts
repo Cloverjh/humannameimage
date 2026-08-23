@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireAuthenticated } from "@/lib/auth";
+import { getOpenAIImageSize } from "@/lib/generativeOptions";
 import { chooseImageModel, requestImageGeneration } from "@/lib/openaiImageApi";
 import { formatPaletteForPrompt } from "@/lib/paletteEngine";
 import { prepareBackgroundPng } from "@/lib/serverImageProcessing";
@@ -15,7 +16,7 @@ export const maxDuration = 300;
 
 const thumbnailWidth = 1920;
 const thumbnailHeight = 1440;
-const apiSize = "1536x1024";
+const apiSize = getOpenAIImageSize(thumbnailWidth, thumbnailHeight);
 
 type RequestBody = {
   form?: EducationImageForm;

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireAuthenticated } from "@/lib/auth";
+import { getOpenAIImageSize } from "@/lib/generativeOptions";
 import { getIconFileName } from "@/lib/iconAssets";
 import { chooseImageModel, requestImageEdit } from "@/lib/openaiImageApi";
 import { formatPaletteForPrompt } from "@/lib/paletteEngine";
@@ -133,7 +134,7 @@ async function requestAndProcessIcon({
   const openAIStartedAt = performance.now();
   const data = await requestImageEdit({
     apiPrompt,
-    apiSize: "1024x1024",
+    apiSize: getOpenAIImageSize(1024, 1024),
     inputImageDataUrl,
     model,
     transparentRequested: true,
