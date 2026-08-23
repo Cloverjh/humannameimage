@@ -14,6 +14,26 @@ export interface ManualPalette {
   neutral: string;
 }
 
+export type PaletteRoleMap = Record<PaletteRole, string>;
+
+export interface RecolorMetadata {
+  version: number;
+  baseVersion: number;
+  palette: PaletteRoleMap;
+  preservedLayout: boolean;
+  preservedLineBreaks: boolean;
+  method: "server-recolor" | "image-edit";
+  createdAt: string;
+  sourceImageId?: string;
+  options?: {
+    titleColors: boolean;
+    iconColors: boolean;
+    decorationColors: boolean;
+    emphasisColors: boolean;
+  };
+  extractedColors?: string[];
+}
+
 export interface EducationImageForm {
   title: string;
   promotionCopy: string;
@@ -164,11 +184,12 @@ export interface GeneratedIconAsset {
   sourceImageId?: string;
   sourceComponentIndex?: number;
   model?: string;
-  operation?: "server-extract" | "edit" | "generation";
+  operation?: "server-extract" | "server-recolor" | "edit" | "generation";
   prompt?: string;
   validationStatus?: PngValidationStatus;
   validation?: PngValidationResult;
   corrected?: boolean;
+  recolor?: RecolorMetadata;
   retryCount?: number;
   timings?: {
     openaiMs?: number;
@@ -215,10 +236,11 @@ export interface GeneratedImage {
   background?: "transparent" | "opaque" | "auto";
   apiSize?: string;
   sourceImageId?: string;
-  operation?: "generation" | "edit";
+  operation?: "generation" | "edit" | "server-recolor";
   validationStatus?: PngValidationStatus;
   validation?: PngValidationResult;
   corrected?: boolean;
+  recolor?: RecolorMetadata;
   retryCount?: number;
   timings?: {
     openaiMs: number;

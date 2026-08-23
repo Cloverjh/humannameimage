@@ -1,7 +1,15 @@
 import sharp from "sharp";
 import { parseImageSize } from "@/lib/generativeOptions";
 import { getIconFileName } from "@/lib/iconAssets";
-import type { GeneratedIconAsset, IconSpec, ImageSize, PngValidationResult } from "@/lib/generativeTypes";
+import type {
+  GeneratedIconAsset,
+  IconSpec,
+  ImageSize,
+  PaletteColor,
+  PaletteRole,
+  PaletteRoleMap,
+  PngValidationResult
+} from "@/lib/generativeTypes";
 
 const DEFAULT_TRANSPARENT_PIXEL_RATIO_THRESHOLD = Number(
   process.env.TRANSPARENT_PIXEL_RATIO_THRESHOLD ?? "0.05"
@@ -31,6 +39,8 @@ type BackgroundRemovalResult = {
   buffer: Buffer;
   changedPixels: number;
 };
+
+type RoleRgbMap = Partial<Record<PaletteRole, [number, number, number]>>;
 
 export function dataUrlToBuffer(dataUrl: string) {
   const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
@@ -191,6 +201,70 @@ export async function prepareBackgroundPng(base64Png: string, options: { width?:
     height,
     processingMs: performance.now() - startedAt
   };
+}
+
+export async function recolorTransparentPng({
+  imageDataUrl,
+  currentPalette,
+  targetPalette
+}: {
+  imageDataUrl: string;
+  currentPalette: PaletteColor[];
+  targetPalette: PaletteRoleMap;
+}) {
+  const startedAt = performance.now();
+  const source = dataUrlToBuffer(imageDataUrl);
+  const normalized = await normalizeTransparentPng(source.buffer);
+  const decoded = await decodeRgba(normalized.buffer);
+  const beforeColors = extractDominantColorsFromRgba(decoded, 8);
+  const sourceRoles = paletteToRoleRgbMap(currentPalette);
+  const targetRoles = roleMapToRgbMap(targetPalette);
+  const outputBytes = Buffer.from(decoded.data);
+
+  for (let byteIndex = 0; byteIndex < outputBytes.length; byteIndex += 4) {
+    const alpha = outputBytes[byteIndex + 3];
+
+    if (alpha <= 8) {
+      continue;
+    }
+
+    const sourcePixel: [number, number, number] = [
+      outputBytes[byteIndex],
+      outputBytes[byteIndex + 1],
+      outputBytes[byteIndex + 2]
+    ];
+    const role = choosePaletteRole(sourcePixel, sourceRoles);
+    const targetColor = targetRoles[role] ?? targetRoles.primary ?? sourcePixel;
+    const [red, green, blue] = recolorPixel(sourcePixel, targetColor, role);
+    outputBytes[byteIndex] = red;
+    outputBytes[byteIndex + 1] = green;
+    outputBytes[byteIndex + 2] = blue;
+  }
+
+  const output = await rgbaToPng(outputBytes, decoded.width, decoded.height);
+  const validation = await validateTransparentPng(output, {
+    corrected: true,
+    originalHadAlpha: true
+  });
+  const metadata = await sharp(output, { failOn: "none" }).metadata();
+
+  return {
+    imageDataUrl: `data:image/png;base64,${output.toString("base64")}`,
+    width: metadata.width ?? decoded.width,
+    height: metadata.height ?? decoded.height,
+    processingMs: performance.now() - startedAt,
+    validation,
+    validationStatus: validation.status,
+    corrected: validation.corrected,
+    extractedColors: beforeColors
+  };
+}
+
+export async function extractDominantTransparentColors(imageDataUrl: string, colorCount = 8) {
+  const source = dataUrlToBuffer(imageDataUrl);
+  const normalized = await normalizeTransparentPng(source.buffer);
+  const decoded = await decodeRgba(normalized.buffer);
+  return extractDominantColorsFromRgba(decoded, colorCount);
 }
 
 export async function extractActualIconAssets({
@@ -1085,6 +1159,192 @@ function quantizeColor(red: number, green: number, blue: number): [number, numbe
 
 function quantizeChannel(value: number) {
   return Math.max(0, Math.min(255, Math.round(value / 16) * 16));
+}
+
+function paletteToRoleRgbMap(palette: PaletteColor[]): RoleRgbMap {
+  const entries = palette
+    .filter((color): color is PaletteColor & { role: PaletteRole } => Boolean(color.role))
+    .map((color) => [color.role, hexToRgbTuple(color.hex)] as const)
+    .filter((entry): entry is readonly [PaletteRole, [number, number, number]] => Boolean(entry[1]));
+
+  return Object.fromEntries(entries);
+}
+
+function roleMapToRgbMap(palette: PaletteRoleMap): RoleRgbMap {
+  const roles: PaletteRole[] = ["primary", "secondary", "accent", "supporting", "neutral"];
+  const entries = roles
+    .map((role) => [role, hexToRgbTuple(palette[role])] as const)
+    .filter((entry): entry is readonly [PaletteRole, [number, number, number]] => Boolean(entry[1]));
+
+  return Object.fromEntries(entries);
+}
+
+function choosePaletteRole(pixel: [number, number, number], sourceRoles: RoleRgbMap): PaletteRole {
+  const roles: PaletteRole[] = ["primary", "secondary", "accent", "supporting", "neutral"];
+  const pixelHsl = rgbToHslTuple(pixel);
+  const available = roles
+    .map((role) => ({ role, color: sourceRoles[role] }))
+    .filter((entry): entry is { role: PaletteRole; color: [number, number, number] } => Boolean(entry.color));
+
+  if (available.length === 0) {
+    return inferRoleFromPixel(pixel);
+  }
+
+  const byRgb = [...available].sort((first, second) => colorDistance(first.color, pixel) - colorDistance(second.color, pixel));
+  const bestRgb = byRgb[0];
+
+  if (bestRgb && colorDistance(bestRgb.color, pixel) <= 150) {
+    return bestRgb.role;
+  }
+
+  if (pixelHsl.s < 0.16 || pixelHsl.l < 0.18) {
+    return sourceRoles.neutral ? "neutral" : bestRgb.role;
+  }
+
+  const byHue = [...available].sort((first, second) => {
+    const firstHsl = rgbToHslTuple(first.color);
+    const secondHsl = rgbToHslTuple(second.color);
+    return hueDistance(firstHsl.h, pixelHsl.h) - hueDistance(secondHsl.h, pixelHsl.h);
+  });
+
+  return byHue[0]?.role ?? bestRgb.role;
+}
+
+function inferRoleFromPixel(pixel: [number, number, number]): PaletteRole {
+  const hsl = rgbToHslTuple(pixel);
+
+  if (hsl.s < 0.16 || hsl.l < 0.2) {
+    return "neutral";
+  }
+
+  if (hsl.l > 0.78) {
+    return "supporting";
+  }
+
+  return "primary";
+}
+
+function recolorPixel(
+  source: [number, number, number],
+  target: [number, number, number],
+  role: PaletteRole
+): [number, number, number] {
+  const sourceHsl = rgbToHslTuple(source);
+  const targetHsl = rgbToHslTuple(target);
+  const isNeutralRole = role === "neutral";
+  const saturation = isNeutralRole ? Math.min(targetHsl.s, sourceHsl.s * 0.4) : clamp01(targetHsl.s * 0.82 + sourceHsl.s * 0.18);
+  const lightnessBias = isNeutralRole ? 0.34 : 0.5;
+  const lightness = clamp01(targetHsl.l * lightnessBias + sourceHsl.l * (1 - lightnessBias));
+
+  return hslToRgbTuple(targetHsl.h, saturation, lightness);
+}
+
+function extractDominantColorsFromRgba(image: RgbaImage, colorCount: number) {
+  const histogram = new Map<string, { count: number; color: [number, number, number] }>();
+  const step = Math.max(1, Math.floor(Math.sqrt((image.width * image.height) / 120000)));
+
+  for (let y = 0; y < image.height; y += step) {
+    for (let x = 0; x < image.width; x += step) {
+      const byteIndex = (y * image.width + x) * 4;
+      const alpha = image.data[byteIndex + 3];
+
+      if (alpha <= 32) {
+        continue;
+      }
+
+      const color = quantizeColor(image.data[byteIndex], image.data[byteIndex + 1], image.data[byteIndex + 2]);
+      const key = color.join(",");
+      const entry = histogram.get(key);
+
+      if (entry) {
+        entry.count += 1;
+      } else {
+        histogram.set(key, { count: 1, color });
+      }
+    }
+  }
+
+  return [...histogram.values()]
+    .sort((first, second) => second.count - first.count)
+    .slice(0, colorCount)
+    .map((entry) => colorToHex(entry.color).toUpperCase());
+}
+
+function hexToRgbTuple(hex: string): [number, number, number] | null {
+  const normalized = hex.trim().replace("#", "");
+
+  if (!/^[0-9a-fA-F]{6}$/.test(normalized)) {
+    return null;
+  }
+
+  return [
+    parseInt(normalized.slice(0, 2), 16),
+    parseInt(normalized.slice(2, 4), 16),
+    parseInt(normalized.slice(4, 6), 16)
+  ];
+}
+
+function rgbToHslTuple([red, green, blue]: [number, number, number]) {
+  const r = red / 255;
+  const g = green / 255;
+  const b = blue / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  let h = 0;
+  let s = 0;
+  const l = (max + min) / 2;
+
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+
+    switch (max) {
+      case r:
+        h = (g - b) / d + (g < b ? 6 : 0);
+        break;
+      case g:
+        h = (b - r) / d + 2;
+        break;
+      default:
+        h = (r - g) / d + 4;
+    }
+
+    h *= 60;
+  }
+
+  return { h, s, l };
+}
+
+function hslToRgbTuple(h: number, s: number, l: number): [number, number, number] {
+  const hue = (((h % 360) + 360) % 360) / 360;
+
+  if (s === 0) {
+    const value = Math.round(l * 255);
+    return [value, value, value];
+  }
+
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const channels = [hue + 1 / 3, hue, hue - 1 / 3].map((channel) => {
+    let t = channel;
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  });
+
+  return channels.map((channel) => Math.max(0, Math.min(255, Math.round(channel * 255)))) as [number, number, number];
+}
+
+function hueDistance(first: number, second: number) {
+  const diff = Math.abs(first - second) % 360;
+  return diff > 180 ? 360 - diff : diff;
+}
+
+function clamp01(value: number) {
+  return Math.max(0, Math.min(1, value));
 }
 
 function colorDistance(first: [number, number, number], second: [number, number, number]) {

@@ -28,7 +28,9 @@ import type {
   ManualPalette,
   OutputType,
   PaletteColor,
+  PaletteRoleMap,
   PngValidationStatus,
+  RecolorMetadata,
   ThumbnailBackgroundSpec
 } from "@/lib/generativeTypes";
 
@@ -117,6 +119,35 @@ type BackgroundResult = {
   error?: string;
 };
 
+type RecolorOptions = {
+  titleColors: boolean;
+  iconColors: boolean;
+  decorationColors: boolean;
+  emphasisColors: boolean;
+  includeDecoratedTitle: boolean;
+  includeTitleOnly: boolean;
+  includeActualIcons: boolean;
+  includeRecommendedIcons: boolean;
+};
+
+type RecolorPreview = {
+  paletteKey: string;
+  version: number;
+  decoratedTitle?: GeneratedImage;
+  titleOnly?: GeneratedImage;
+  extractedColors: string[];
+};
+
+type RecolorSnapshot = {
+  version: number;
+  label: string;
+  results: Record<OutputType, ImageResult>;
+  actualIcons: IconResult[];
+  recommendedIcons: IconResult[];
+  promptSet: GeneratedPromptSet | null;
+  palette: PaletteRoleMap;
+};
+
 type TimingEntry = {
   label: string;
   ms: number;
@@ -132,6 +163,16 @@ const checkerboardFailureMessage = "실제 투명 배경이 아닌 체크무늬�
 const thumbnailBackgroundSize = { width: 1920, height: 1440 };
 const recentColorFamiliesStorageKey = "education-title-recent-color-families";
 const maxRecentColorFamilies = 8;
+const defaultRecolorOptions: RecolorOptions = {
+  titleColors: true,
+  iconColors: true,
+  decorationColors: true,
+  emphasisColors: true,
+  includeDecoratedTitle: true,
+  includeTitleOnly: true,
+  includeActualIcons: true,
+  includeRecommendedIcons: true
+};
 
 const initialResults = (): Record<OutputType, ImageResult> => ({
   "decorated-title": { outputType: "decorated-title", status: "idle" },
@@ -170,6 +211,13 @@ export function GenerativeImageStudio() {
   const [progressText, setProgressText] = useState("");
   const [error, setError] = useState("");
   const [timings, setTimings] = useState<TimingEntry[]>([]);
+  const [recolorPanelOpen, setRecolorPanelOpen] = useState(false);
+  const [recolorPalette, setRecolorPalette] = useState<PaletteRoleMap>(manualPaletteToRoleMap(defaultManualPalette));
+  const [recolorOptions, setRecolorOptions] = useState<RecolorOptions>(defaultRecolorOptions);
+  const [recolorPreview, setRecolorPreview] = useState<RecolorPreview | null>(null);
+  const [recolorHistory, setRecolorHistory] = useState<RecolorSnapshot[]>([]);
+  const [currentVersion, setCurrentVersion] = useState(1);
+  const [isRecoloring, setIsRecoloring] = useState(false);
   const runStartedAtRef = useRef(0);
 
   const todayKey = useMemo(() => getTodayStorageKey(), []);
@@ -188,11 +236,24 @@ export function GenerativeImageStudio() {
     thumbnailBackgrounds.length === 2 && thumbnailBackgrounds.every((result) => isValidBackgroundAsset(result.background));
   const finalZipReady = primaryResultsReady && actualIconsReady && recommendedIconsReady && thumbnailBackgroundsReady;
   const manualPalette = form.manualPalette ?? defaultManualPalette;
+  const currentPaletteMap = useMemo(
+    () => (promptSet ? paletteColorsToRoleMap(promptSet.designSpec.palette) : manualPaletteToRoleMap(defaultManualPalette)),
+    [promptSet]
+  );
 
   useEffect(() => {
     const storedCount = Number(window.localStorage.getItem(todayKey) ?? "0");
     setDailyCount(Number.isFinite(storedCount) ? storedCount : 0);
   }, [todayKey]);
+
+  useEffect(() => {
+    if (!promptSet) {
+      return;
+    }
+
+    setRecolorPalette(paletteColorsToRoleMap(promptSet.designSpec.palette));
+    setRecolorPreview(null);
+  }, [promptSet]);
 
   const updateField = <Key extends keyof EducationImageForm>(key: Key, value: EducationImageForm[Key]) => {
     setForm((current) => ({ ...current, [key]: value }));
@@ -230,6 +291,7 @@ export function GenerativeImageStudio() {
       setActualIcons([]);
       setRecommendedIcons([]);
       setThumbnailBackgrounds([]);
+      resetRecolorState();
       setCandidates(markAllCandidates("generating"));
       setFlowState("generating-candidates");
       setIsGenerating(true);
@@ -342,6 +404,7 @@ export function GenerativeImageStudio() {
       setActualIcons([]);
       setRecommendedIcons([]);
       setThumbnailBackgrounds([]);
+      resetRecolorState();
       setCandidates(initialCandidates());
       setFlowState("generating-candidates");
       setIsGenerating(true);
@@ -403,6 +466,7 @@ export function GenerativeImageStudio() {
     setActualIcons([]);
     setRecommendedIcons([]);
     setThumbnailBackgrounds([]);
+    resetRecolorState();
     setFlowState("generating-title");
     setIsGenerating(true);
     setProgressText("3/7 선택한 디자인에서 제목만 분리하고 있어요...");
@@ -799,6 +863,237 @@ export function GenerativeImageStudio() {
     }
   };
 
+  const openRecolorPanel = () => {
+    setRecolorPalette(currentPaletteMap);
+    setRecolorPreview(null);
+    setRecolorPanelOpen(true);
+  };
+
+  const recommendRecolorPalette = async () => {
+    if (!promptSet || isGenerating || isRecoloring) {
+      return;
+    }
+
+    try {
+      setIsRecoloring(true);
+      setError("");
+      setProgressText("현재 디자인 구조를 유지할 새 색상 팔레트를 추천하고 있어요...");
+
+      const normalizedForm = normalizeForm(
+        {
+          ...form,
+          recentColorFamilies: [
+            promptSet.designSpec.paletteFamily ?? promptSet.designSpec.paletteLabel ?? "",
+            ...getRecentColorFamilies()
+          ].filter(Boolean)
+        },
+        true
+      );
+      const response = await fetch("/api/generate-candidates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(normalizedForm)
+      });
+      const data = await response.json();
+
+      if (response.status === 401) {
+        window.location.href = "/login";
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "색상 추천에 실패했습니다.");
+      }
+
+      const nextCandidateSet = data.candidateSet as GeneratedCandidateSet;
+      const currentFamily = promptSet.designSpec.paletteFamily;
+      const recommended =
+        candidateOrder
+          .map((candidateId) => nextCandidateSet.candidates[candidateId])
+          .find((candidate) => candidate.designSpec.paletteFamily !== currentFamily) ??
+        nextCandidateSet.candidates["option-1"];
+
+      setRecolorPalette(paletteColorsToRoleMap(recommended.designSpec.palette));
+      setRecolorPanelOpen(true);
+      setRecolorPreview(null);
+      setProgressText("새 팔레트를 추천했습니다. 미리보기 후 적용해 주세요.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "색상 추천에 실패했습니다.");
+    } finally {
+      setIsRecoloring(false);
+    }
+  };
+
+  const previewRecolor = async () => {
+    if (!promptSet || isRecoloring) {
+      return;
+    }
+
+    const decoratedTitle = results["decorated-title"].image;
+    const titleOnly = results["title-only"].image;
+
+    if (
+      (!decoratedTitle || !recolorOptions.includeDecoratedTitle) &&
+      (!titleOnly || !recolorOptions.includeTitleOnly)
+    ) {
+      setError("색상 변경할 제목 이미지가 없습니다.");
+      return;
+    }
+
+    try {
+      setIsRecoloring(true);
+      setError("");
+      setProgressText("로컬 처리로 색상 변경 미리보기를 만들고 있어요...");
+      const nextVersion = currentVersion + 1;
+      const previewEntries = await Promise.all([
+        decoratedTitle && recolorOptions.includeDecoratedTitle
+          ? requestRecolorImage({
+              image: decoratedTitle,
+              promptSet,
+              targetPalette: recolorPalette,
+              version: nextVersion,
+              title: form.title,
+              options: recolorOptions
+            })
+          : Promise.resolve(null),
+        titleOnly && recolorOptions.includeTitleOnly
+          ? requestRecolorImage({
+              image: titleOnly,
+              promptSet,
+              targetPalette: recolorPalette,
+              version: nextVersion,
+              title: form.title,
+              options: recolorOptions
+            })
+          : Promise.resolve(null)
+      ]);
+
+      setRecolorPreview({
+        paletteKey: paletteKey(recolorPalette),
+        version: nextVersion,
+        decoratedTitle: previewEntries[0] ?? undefined,
+        titleOnly: previewEntries[1] ?? undefined,
+        extractedColors: Array.from(
+          new Set(previewEntries.flatMap((entry) => entry?.recolor?.extractedColors ?? []))
+        ).slice(0, 8)
+      });
+      setProgressText("색상 변경 미리보기를 만들었습니다.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "색상 변경 미리보기에 실패했습니다.");
+    } finally {
+      setIsRecoloring(false);
+    }
+  };
+
+  const applyRecolor = async () => {
+    if (!promptSet || isRecoloring) {
+      return;
+    }
+
+    const decoratedTitle = results["decorated-title"].image;
+    const titleOnly = results["title-only"].image;
+    const nextVersion = currentVersion + 1;
+
+    if (!decoratedTitle && !titleOnly) {
+      setError("색상 변경할 결과물이 없습니다.");
+      return;
+    }
+
+    try {
+      setIsRecoloring(true);
+      setError("");
+      setProgressText("현재 결과물의 구조를 유지한 채 색상만 적용하고 있어요...");
+      setRecolorHistory((current) => [
+        ...current,
+        {
+          version: currentVersion,
+          label: currentVersion === 1 ? "원본" : `색상 변경 v${currentVersion}`,
+          results,
+          actualIcons,
+          recommendedIcons,
+          promptSet,
+          palette: currentPaletteMap
+        }
+      ]);
+
+      const previewMatches = recolorPreview?.paletteKey === paletteKey(recolorPalette) && recolorPreview.version === nextVersion;
+      const [nextDecorated, nextTitleOnly] = await Promise.all([
+        recolorOptions.includeDecoratedTitle && decoratedTitle
+          ? previewMatches && recolorPreview.decoratedTitle
+            ? Promise.resolve(recolorPreview.decoratedTitle)
+            : requestRecolorImage({
+                image: decoratedTitle,
+                promptSet,
+                targetPalette: recolorPalette,
+                version: nextVersion,
+                title: form.title,
+                options: recolorOptions
+              })
+          : Promise.resolve(decoratedTitle),
+        recolorOptions.includeTitleOnly && titleOnly
+          ? previewMatches && recolorPreview.titleOnly
+            ? Promise.resolve(recolorPreview.titleOnly)
+            : requestRecolorImage({
+                image: titleOnly,
+                promptSet,
+                targetPalette: recolorPalette,
+                version: nextVersion,
+                title: form.title,
+                options: recolorOptions
+              })
+          : Promise.resolve(titleOnly)
+      ]);
+
+      const nextActualIcons = recolorOptions.includeActualIcons
+        ? await recolorIconResults(actualIcons, promptSet, recolorPalette, nextVersion, recolorOptions)
+        : actualIcons;
+      const nextRecommendedIcons = recolorOptions.includeRecommendedIcons
+        ? await recolorIconResults(recommendedIcons, promptSet, recolorPalette, nextVersion, recolorOptions)
+        : recommendedIcons;
+      const nextPromptSet = applyPaletteToPromptSet(promptSet, recolorPalette);
+      const nextResults = { ...results };
+
+      if (nextDecorated) {
+        nextResults["decorated-title"] = { ...nextResults["decorated-title"], status: "success", image: nextDecorated };
+      }
+
+      if (nextTitleOnly) {
+        nextResults["title-only"] = { ...nextResults["title-only"], status: "success", image: nextTitleOnly };
+      }
+
+      setResults(nextResults);
+      setActualIcons(nextActualIcons);
+      setRecommendedIcons(nextRecommendedIcons);
+      setPromptSet(nextPromptSet);
+      setCurrentVersion(nextVersion);
+      setRecolorPreview(null);
+      setRecolorPanelOpen(false);
+      setProgressText(`색상 변경 v${nextVersion}을 적용했습니다.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "색상 변경 적용에 실패했습니다.");
+    } finally {
+      setIsRecoloring(false);
+    }
+  };
+
+  const revertRecolor = () => {
+    const previous = recolorHistory[recolorHistory.length - 1];
+
+    if (!previous) {
+      return;
+    }
+
+    setResults(previous.results);
+    setActualIcons(previous.actualIcons);
+    setRecommendedIcons(previous.recommendedIcons);
+    setPromptSet(previous.promptSet);
+    setRecolorPalette(previous.palette);
+    setCurrentVersion(previous.version);
+    setRecolorPreview(null);
+    setRecolorHistory((current) => current.slice(0, -1));
+    setProgressText(`${previous.label} 버전으로 되돌렸습니다.`);
+  };
+
   return (
     <main className="min-h-screen p-3 md:p-6">
       <div className="mx-auto grid max-w-[1540px] gap-4 lg:grid-cols-[470px_minmax(0,1fr)]">
@@ -1051,7 +1346,57 @@ export function GenerativeImageStudio() {
                   >
                     최종 전체 ZIP 다운로드
                   </button>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-xs font-extrabold text-slate-700 transition hover:border-[#5F8F8B] disabled:cursor-not-allowed disabled:opacity-45"
+                      disabled={!primaryResultsReady || isRecoloring}
+                      type="button"
+                      onClick={openRecolorPanel}
+                    >
+                      색상 변경
+                    </button>
+                    <button
+                      className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-xs font-extrabold text-slate-700 transition hover:border-[#5F8F8B] disabled:cursor-not-allowed disabled:opacity-45"
+                      disabled={!primaryResultsReady || isRecoloring}
+                      type="button"
+                      onClick={recommendRecolorPalette}
+                    >
+                      색상만 다시 추천
+                    </button>
+                    <button
+                      className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-xs font-extrabold text-slate-700 transition hover:border-[#5F8F8B] disabled:cursor-not-allowed disabled:opacity-45"
+                      disabled={recolorHistory.length === 0 || isRecoloring}
+                      type="button"
+                      onClick={revertRecolor}
+                    >
+                      이전 색상으로 되돌리기
+                    </button>
+                  </div>
                 </div>
+
+                {recolorPanelOpen ? (
+                  <RecolorPanel
+                    currentPalette={currentPaletteMap}
+                    extractedColors={recolorPreview?.extractedColors ?? results["decorated-title"].image?.recolor?.extractedColors ?? []}
+                    isWorking={isRecoloring}
+                    options={recolorOptions}
+                    palette={recolorPalette}
+                    preview={recolorPreview}
+                    version={currentVersion}
+                    onApply={applyRecolor}
+                    onCancel={() => {
+                      setRecolorPanelOpen(false);
+                      setRecolorPreview(null);
+                    }}
+                    onOptionsChange={(updates) => setRecolorOptions((current) => ({ ...current, ...updates }))}
+                    onPaletteChange={(updates) => {
+                      setRecolorPalette((current) => ({ ...current, ...updates }));
+                      setRecolorPreview(null);
+                    }}
+                    onPreview={previewRecolor}
+                    onRecommend={recommendRecolorPalette}
+                  />
+                ) : null}
 
                 <div className="grid gap-4 xl:grid-cols-2">
                   {primaryOutputOrder.map((outputType) => (
@@ -1139,6 +1484,7 @@ export function GenerativeImageStudio() {
     setActualIcons([]);
     setRecommendedIcons([]);
     setThumbnailBackgrounds([]);
+    resetRecolorState();
     setError("");
     setProgressText("");
     setTimings([]);
@@ -1146,6 +1492,16 @@ export function GenerativeImageStudio() {
 
   function addTiming(label: string, ms: number) {
     setTimings((current) => [...current.filter((entry) => entry.label !== label), { label, ms }]);
+  }
+
+  function resetRecolorState() {
+    setRecolorPanelOpen(false);
+    setRecolorPalette(manualPaletteToRoleMap(defaultManualPalette));
+    setRecolorOptions(defaultRecolorOptions);
+    setRecolorPreview(null);
+    setRecolorHistory([]);
+    setCurrentVersion(1);
+    setIsRecoloring(false);
   }
 }
 
@@ -1293,6 +1649,166 @@ async function requestThumbnailBackground({
   }
 
   return data.background as GeneratedBackgroundAsset;
+}
+
+async function requestRecolorImage({
+  image,
+  promptSet,
+  targetPalette,
+  version,
+  title,
+  options
+}: {
+  image: GeneratedImage;
+  promptSet: GeneratedPromptSet;
+  targetPalette: PaletteRoleMap;
+  version: number;
+  title: string;
+  options: RecolorOptions;
+}) {
+  const scopedTargetPalette = buildScopedTargetPalette(
+    promptSet.designSpec.palette,
+    targetPalette,
+    options,
+    image.outputType
+  );
+  const response = await fetch("/api/recolor-image", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      imageDataUrl: image.imageDataUrl,
+      currentPalette: promptSet.designSpec.palette,
+      targetPalette: scopedTargetPalette,
+      assetType: image.outputType,
+      version,
+      baseVersion: image.recolor?.baseVersion ?? image.recolor?.version ?? 1,
+      sourceImageId: image.id,
+      size: image.size,
+      title,
+      lineBreakPlan: promptSet.designSpec.lineBreakPlan,
+      allowImageEditFallback: image.outputType === "decorated-title",
+      options: toRecolorMetadataOptions(options)
+    })
+  });
+  const data = await response.json();
+
+  if (response.status === 401) {
+    window.location.href = "/login";
+    throw new Error("인증이 만료되었습니다.");
+  }
+
+  if (!response.ok) {
+    throw new Error(data.error ?? "색상 변경에 실패했습니다.");
+  }
+
+  const recolored = data.recolored as {
+    imageDataUrl: string;
+    validation: GeneratedImage["validation"];
+    validationStatus: GeneratedImage["validationStatus"];
+    corrected: boolean;
+    recolor: RecolorMetadata;
+    timings: { processingMs: number; totalMs: number };
+  };
+
+  return {
+    ...image,
+    id: crypto.randomUUID(),
+    imageDataUrl: recolored.imageDataUrl,
+    createdAt: new Date().toISOString(),
+    operation: "server-recolor" as const,
+    validation: recolored.validation,
+    validationStatus: recolored.validationStatus,
+    corrected: recolored.corrected,
+    recolor: recolored.recolor,
+    prompt: applyPaletteToPrompt(image.prompt, scopedTargetPalette),
+    timings: {
+      openaiMs: 0,
+      resizeMs: recolored.timings.processingMs,
+      totalMs: recolored.timings.totalMs
+    }
+  };
+}
+
+async function recolorIconResults(
+  iconResults: IconResult[],
+  promptSet: GeneratedPromptSet,
+  targetPalette: PaletteRoleMap,
+  version: number,
+  options: RecolorOptions
+) {
+  const entries = await Promise.all(
+    iconResults.map(async (result) => {
+      if (!result.icon || result.status !== "success") {
+        return result;
+      }
+
+      const icon = result.icon;
+      const assetType = result.kind === "actual" ? "actual-icon" : "recommended-icon";
+      const scopedTargetPalette = buildScopedTargetPalette(
+        promptSet.designSpec.palette,
+        targetPalette,
+        options,
+        assetType
+      );
+      const response = await fetch("/api/recolor-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageDataUrl: icon.imageDataUrl,
+          currentPalette: promptSet.designSpec.palette,
+          targetPalette: scopedTargetPalette,
+          assetType,
+          version,
+          baseVersion: icon.recolor?.baseVersion ?? icon.recolor?.version ?? 1,
+          sourceImageId: icon.id,
+          options: toRecolorMetadataOptions(options)
+        })
+      });
+      const data = await response.json();
+
+      if (response.status === 401) {
+        window.location.href = "/login";
+        throw new Error("인증이 만료되었습니다.");
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error ?? `${icon.name} 색상 변경에 실패했습니다.`);
+      }
+
+      const recolored = data.recolored as {
+        imageDataUrl: string;
+        width: number;
+        height: number;
+        validation: GeneratedIconAsset["validation"];
+        validationStatus: GeneratedIconAsset["validationStatus"];
+        corrected: boolean;
+        recolor: RecolorMetadata;
+        timings: { processingMs: number; totalMs: number };
+      };
+      const nextIcon: GeneratedIconAsset = {
+        ...icon,
+        id: crypto.randomUUID(),
+        imageDataUrl: recolored.imageDataUrl,
+        width: recolored.width,
+        height: recolored.height,
+        fileName: addVersionToFileName(icon.fileName, version),
+        createdAt: new Date().toISOString(),
+        operation: "server-recolor",
+        validation: recolored.validation,
+        validationStatus: recolored.validationStatus,
+        corrected: recolored.corrected,
+        recolor: recolored.recolor,
+        timings: {
+          processingMs: recolored.timings.processingMs,
+          totalMs: recolored.timings.totalMs
+        }
+      };
+
+      return { ...result, icon: nextIcon };
+    })
+  );
+
+  return entries;
 }
 
 function toIconResults(kind: IconAssetKind, specs: IconSpec[], icons: GeneratedIconAsset[]): IconResult[] {
@@ -1454,6 +1970,196 @@ function PaletteChip({ color }: { color: PaletteColor }) {
   );
 }
 
+function RecolorPanel({
+  currentPalette,
+  extractedColors,
+  isWorking,
+  options,
+  palette,
+  preview,
+  version,
+  onApply,
+  onCancel,
+  onOptionsChange,
+  onPaletteChange,
+  onPreview,
+  onRecommend
+}: {
+  currentPalette: PaletteRoleMap;
+  extractedColors: string[];
+  isWorking: boolean;
+  options: RecolorOptions;
+  palette: PaletteRoleMap;
+  preview: RecolorPreview | null;
+  version: number;
+  onApply: () => void;
+  onCancel: () => void;
+  onOptionsChange: (updates: Partial<RecolorOptions>) => void;
+  onPaletteChange: (updates: Partial<PaletteRoleMap>) => void;
+  onPreview: () => void;
+  onRecommend: () => void;
+}) {
+  return (
+    <section className="mb-5 rounded-lg border border-[#5F8F8B]/25 bg-[#F8F4EC]/70 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="font-black tracking-[-0.03em] text-slate-900">색상 변경</h3>
+          <p className="mt-1 text-sm font-bold leading-6 text-slate-500">
+            현재 디자인 구조, 줄바꿈, 제목/아이콘 배치는 유지하고 색상만 바꿉니다. 다음 적용 버전은 v{version + 1}입니다.
+          </p>
+        </div>
+        <button
+          className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-extrabold text-slate-600 transition hover:border-[#5F8F8B]"
+          type="button"
+          onClick={onRecommend}
+        >
+          색상만 다시 추천
+        </button>
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-2">
+        <PaletteRoleGrid title="현재 팔레트" palette={currentPalette} />
+        <div>
+          <h4 className="mb-2 text-xs font-black uppercase tracking-[0.16em] text-slate-400">변경 후 팔레트</h4>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <ColorInput label="Primary" value={palette.primary} onChange={(value) => onPaletteChange({ primary: value })} />
+            <ColorInput label="Secondary" value={palette.secondary} onChange={(value) => onPaletteChange({ secondary: value })} />
+            <ColorInput label="Accent" value={palette.accent} onChange={(value) => onPaletteChange({ accent: value })} />
+            <ColorInput label="Supporting" value={palette.supporting} onChange={(value) => onPaletteChange({ supporting: value })} />
+            <ColorInput label="Neutral" value={palette.neutral} onChange={(value) => onPaletteChange({ neutral: value })} />
+          </div>
+        </div>
+      </div>
+
+      {extractedColors.length > 0 ? (
+        <div className="mt-4">
+          <h4 className="mb-2 text-xs font-black uppercase tracking-[0.16em] text-slate-400">이미지에서 추출한 현재 주요 색상</h4>
+          <div className="flex flex-wrap gap-2">
+            {extractedColors.map((hex) => (
+              <span key={hex} className="inline-flex items-center gap-2 rounded-full bg-white px-2.5 py-1 text-xs font-extrabold text-slate-600">
+                <span className="h-4 w-4 rounded-full border border-slate-200" style={{ backgroundColor: hex }} />
+                {hex}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+        <div className="rounded-lg bg-white p-3">
+          <h4 className="mb-2 text-xs font-black uppercase tracking-[0.16em] text-slate-400">색상 역할</h4>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <CheckOption checked={options.titleColors} label="제목 색상 변경" onChange={(value) => onOptionsChange({ titleColors: value })} />
+            <CheckOption checked={options.iconColors} label="아이콘 색상 변경" onChange={(value) => onOptionsChange({ iconColors: value })} />
+            <CheckOption
+              checked={options.decorationColors}
+              label="장식 선 색상 변경"
+              onChange={(value) => onOptionsChange({ decorationColors: value })}
+            />
+            <CheckOption
+              checked={options.emphasisColors}
+              label="강조 단어 색상 변경"
+              onChange={(value) => onOptionsChange({ emphasisColors: value })}
+            />
+          </div>
+        </div>
+        <div className="rounded-lg bg-white p-3">
+          <h4 className="mb-2 text-xs font-black uppercase tracking-[0.16em] text-slate-400">적용 범위</h4>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <CheckOption
+              checked={options.includeDecoratedTitle}
+              label="꾸민 제목"
+              onChange={(value) => onOptionsChange({ includeDecoratedTitle: value })}
+            />
+            <CheckOption
+              checked={options.includeTitleOnly}
+              label="제목만 PNG"
+              onChange={(value) => onOptionsChange({ includeTitleOnly: value })}
+            />
+            <CheckOption
+              checked={options.includeActualIcons}
+              label="실제 사용 아이콘"
+              onChange={(value) => onOptionsChange({ includeActualIcons: value })}
+            />
+            <CheckOption
+              checked={options.includeRecommendedIcons}
+              label="추천 아이콘"
+              onChange={(value) => onOptionsChange({ includeRecommendedIcons: value })}
+            />
+          </div>
+        </div>
+      </div>
+
+      {preview ? (
+        <div className="mt-4 grid gap-4 xl:grid-cols-2">
+          {preview.decoratedTitle ? (
+            <PreviewImage title="꾸민 제목 색상 변경 미리보기" imageDataUrl={preview.decoratedTitle.imageDataUrl} />
+          ) : null}
+          {preview.titleOnly ? <PreviewImage title="제목만 색상 변경 미리보기" imageDataUrl={preview.titleOnly.imageDataUrl} /> : null}
+        </div>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <ActionButton disabled={isWorking} onClick={onPreview}>
+          미리보기
+        </ActionButton>
+        <ActionButton disabled={isWorking} onClick={onApply}>
+          적용
+        </ActionButton>
+        <button
+          className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-extrabold text-slate-600 transition hover:border-slate-400"
+          disabled={isWorking}
+          type="button"
+          onClick={onCancel}
+        >
+          취소
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function PaletteRoleGrid({ title, palette }: { title: string; palette: PaletteRoleMap }) {
+  const roles: Array<keyof PaletteRoleMap> = ["primary", "secondary", "accent", "supporting", "neutral"];
+
+  return (
+    <div>
+      <h4 className="mb-2 text-xs font-black uppercase tracking-[0.16em] text-slate-400">{title}</h4>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {roles.map((role) => (
+          <div key={role} className="flex items-center gap-2 rounded-lg bg-white px-3 py-2">
+            <span className="h-6 w-6 rounded-full border border-slate-200" style={{ backgroundColor: palette[role] }} />
+            <span>
+              <span className="block text-[11px] font-black uppercase text-slate-400">{role}</span>
+              <span className="text-xs font-extrabold text-slate-700">{palette[role]}</span>
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CheckOption({ checked, label, onChange }: { checked: boolean; label: string; onChange: (checked: boolean) => void }) {
+  return (
+    <label className="flex items-center gap-2 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-xs font-extrabold text-slate-600">
+      <input checked={checked} className="h-4 w-4 accent-[#5F8F8B]" type="checkbox" onChange={(event) => onChange(event.target.checked)} />
+      {label}
+    </label>
+  );
+}
+
+function PreviewImage({ title, imageDataUrl }: { title: string; imageDataUrl: string }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+      <div className="checkerboard flex aspect-[3/2] min-h-[180px] items-center justify-center p-3">
+        <img alt={title} className="max-h-[320px] w-full object-contain" src={imageDataUrl} />
+      </div>
+      <p className="px-3 py-2 text-xs font-extrabold text-slate-600">{title}</p>
+    </div>
+  );
+}
+
 function FinalResultCard({
   formTitle,
   result,
@@ -1499,7 +2205,10 @@ function FinalResultCard({
           disabled={!canDownload}
           onClick={() => {
             if (!canDownload || !result.image) return;
-            downloadDataUrl(result.image.imageDataUrl, createDownloadName(formTitle, result.outputType));
+            downloadDataUrl(
+              result.image.imageDataUrl,
+              addVersionToFileName(createDownloadName(formTitle, result.outputType), result.image.recolor?.version ?? 1)
+            );
           }}
         >
           PNG 다운로드
@@ -2018,6 +2727,144 @@ function normalizeForm(form: EducationImageForm, refreshStyle: boolean): Educati
     recentColorFamilies: (form.recentColorFamilies ?? []).filter(Boolean).slice(0, maxRecentColorFamilies),
     manualPalette: form.manualPalette
   };
+}
+
+function manualPaletteToRoleMap(palette: ManualPalette): PaletteRoleMap {
+  return {
+    primary: palette.primary,
+    secondary: palette.secondary,
+    accent: palette.accent,
+    supporting: palette.supporting,
+    neutral: palette.neutral
+  };
+}
+
+function paletteColorsToRoleMap(palette: PaletteColor[]): PaletteRoleMap {
+  const fallback = manualPaletteToRoleMap(defaultManualPalette);
+
+  return {
+    primary: palette.find((color) => color.role === "primary")?.hex ?? fallback.primary,
+    secondary: palette.find((color) => color.role === "secondary")?.hex ?? fallback.secondary,
+    accent: palette.find((color) => color.role === "accent")?.hex ?? fallback.accent,
+    supporting: palette.find((color) => color.role === "supporting")?.hex ?? fallback.supporting,
+    neutral: palette.find((color) => color.role === "neutral")?.hex ?? fallback.neutral
+  };
+}
+
+function roleMapToPaletteColors(palette: PaletteRoleMap): PaletteColor[] {
+  return [
+    { role: "primary", name: "변경 primary", hex: palette.primary, usage: "Primary headline / 제목 중심 색상" },
+    { role: "secondary", name: "변경 secondary", hex: palette.secondary, usage: "Secondary headline accent / 제목 두 번째 강조" },
+    { role: "accent", name: "변경 accent", hex: palette.accent, usage: "Small decorative icons and emphasis dots / 강조 아이콘" },
+    { role: "supporting", name: "변경 supporting", hex: palette.supporting, usage: "Supporting details and line accents / 보조 장식" },
+    { role: "neutral", name: "변경 neutral", hex: palette.neutral, usage: "Outline, shadow control, and readability support / 외곽선" }
+  ];
+}
+
+function buildScopedTargetPalette(
+  currentPalette: PaletteColor[],
+  targetPalette: PaletteRoleMap,
+  options: RecolorOptions,
+  assetType: OutputType | "actual-icon" | "recommended-icon"
+): PaletteRoleMap {
+  const current = paletteColorsToRoleMap(currentPalette);
+  const scoped: PaletteRoleMap = { ...current };
+
+  if (assetType === "title-only") {
+    if (options.titleColors) {
+      scoped.primary = targetPalette.primary;
+      scoped.secondary = targetPalette.secondary;
+      scoped.neutral = targetPalette.neutral;
+    }
+    if (options.emphasisColors) {
+      scoped.accent = targetPalette.accent;
+    }
+    return scoped;
+  }
+
+  if (assetType === "actual-icon" || assetType === "recommended-icon") {
+    if (options.iconColors) {
+      return { ...targetPalette };
+    }
+    return scoped;
+  }
+
+  if (options.titleColors) {
+    scoped.primary = targetPalette.primary;
+    scoped.secondary = targetPalette.secondary;
+  }
+  if (options.emphasisColors || options.iconColors) {
+    scoped.accent = targetPalette.accent;
+  }
+  if (options.decorationColors || options.iconColors) {
+    scoped.supporting = targetPalette.supporting;
+  }
+  if (options.decorationColors || options.titleColors) {
+    scoped.neutral = targetPalette.neutral;
+  }
+
+  return scoped;
+}
+
+function applyPaletteToPromptSet(promptSet: GeneratedPromptSet, palette: PaletteRoleMap): GeneratedPromptSet {
+  const nextPalette = roleMapToPaletteColors(palette);
+  const designSpec = {
+    ...promptSet.designSpec,
+    palette: nextPalette,
+    paletteFamily: "Recolor",
+    paletteLabel: "색상 변경 팔레트"
+  };
+
+  return {
+    ...promptSet,
+    designSpec,
+    prompts: {
+      "decorated-title": applyPaletteToPrompt(promptSet.prompts["decorated-title"], palette),
+      "title-only": applyPaletteToPrompt(promptSet.prompts["title-only"], palette),
+      "icons-only": applyPaletteToPrompt(promptSet.prompts["icons-only"], palette)
+    }
+  };
+}
+
+function applyPaletteToPrompt(prompt: GeneratedImage["prompt"], palette: PaletteRoleMap): GeneratedImage["prompt"] {
+  const nextPalette = roleMapToPaletteColors(palette);
+  const designSpec = {
+    ...prompt.designSpec,
+    palette: nextPalette,
+    paletteFamily: "Recolor",
+    paletteLabel: "색상 변경 팔레트"
+  };
+
+  return {
+    ...prompt,
+    palette: nextPalette,
+    analysis: {
+      ...prompt.analysis,
+      recommendedColors: nextPalette.map((color) => `${color.name} ${color.hex}`)
+    },
+    designSpec
+  };
+}
+
+function toRecolorMetadataOptions(options: RecolorOptions): RecolorMetadata["options"] {
+  return {
+    titleColors: options.titleColors,
+    iconColors: options.iconColors,
+    decorationColors: options.decorationColors,
+    emphasisColors: options.emphasisColors
+  };
+}
+
+function paletteKey(palette: PaletteRoleMap) {
+  return [palette.primary, palette.secondary, palette.accent, palette.supporting, palette.neutral].join("|");
+}
+
+function addVersionToFileName(fileName: string, version: number) {
+  if (version <= 1) {
+    return fileName;
+  }
+
+  return fileName.replace(/(\.png)$/i, `_v${version}$1`);
 }
 
 function validateForm(form: EducationImageForm) {

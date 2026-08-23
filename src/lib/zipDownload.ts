@@ -83,13 +83,16 @@ export function downloadFinalZip({
   recommendedIcons: GeneratedIconAsset[];
   thumbnailBackgrounds?: GeneratedBackgroundAsset[];
 }) {
+  const version = Math.max(decoratedTitle.recolor?.version ?? 1, titleOnly.recolor?.version ?? 1);
+  const versionSuffix = version > 1 ? `_v${version}` : "";
+
   downloadZipFiles(`${createSafeBaseName(title)}_최종결과.zip`, [
     {
-      name: "01_꾸민제목_투명.png",
+      name: `01_꾸민제목_투명${versionSuffix}.png`,
       bytes: dataUrlToBytes(decoratedTitle.imageDataUrl)
     },
     {
-      name: "02_제목만_투명.png",
+      name: `02_제목만_투명${versionSuffix}.png`,
       bytes: dataUrlToBytes(titleOnly.imageDataUrl)
     },
     ...actualIcons.map((icon) => ({
@@ -103,7 +106,28 @@ export function downloadFinalZip({
     ...(thumbnailBackgrounds ?? []).map((background) => ({
       name: `thumbnail-backgrounds/${background.fileName}`,
       bytes: dataUrlToBytes(background.imageDataUrl)
-    }))
+    })),
+    {
+      name: "design-meta.json",
+      bytes: textToBytes(
+        JSON.stringify(
+          {
+            title,
+            version,
+            baseVersion: decoratedTitle.recolor?.baseVersion ?? titleOnly.recolor?.baseVersion ?? 1,
+            selectedOption: decoratedTitle.prompt.designSpec.candidateId,
+            selectedOptionLabel: decoratedTitle.prompt.designSpec.candidateLabel,
+            palette: decoratedTitle.recolor?.palette ?? paletteToRoleMap(decoratedTitle.prompt.designSpec.palette),
+            preservedLayout: decoratedTitle.recolor?.preservedLayout ?? true,
+            preservedLineBreaks: decoratedTitle.recolor?.preservedLineBreaks ?? true,
+            recolor: decoratedTitle.recolor ?? titleOnly.recolor ?? null,
+            generatedAt: new Date().toISOString()
+          },
+          null,
+          2
+        )
+      )
+    }
   ]);
 }
 
@@ -218,4 +242,12 @@ function concatBytes(chunks: Uint8Array[]) {
   }
 
   return merged;
+}
+
+function textToBytes(value: string) {
+  return new TextEncoder().encode(value);
+}
+
+function paletteToRoleMap(palette: GeneratedImage["prompt"]["designSpec"]["palette"]) {
+  return Object.fromEntries(palette.filter((color) => color.role).map((color) => [color.role, color.hex]));
 }
