@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireAuthenticated } from "@/lib/auth";
 import { chooseImageModel, requestImageGeneration } from "@/lib/openaiImageApi";
+import { formatPaletteForPrompt } from "@/lib/paletteEngine";
 import { prepareBackgroundPng } from "@/lib/serverImageProcessing";
 import type {
   DesignSpec,
@@ -116,7 +117,7 @@ function buildThumbnailBackgroundPrompt({
   actualIconNames: string[];
   recommendedIconNames: string[];
 }) {
-  const paletteText = designSpec.palette.map((color) => `${color.hex} (${color.usage})`).join(", ");
+  const paletteText = formatPaletteForPrompt(designSpec.palette);
   const iconText = [...actualIconNames, ...recommendedIconNames].filter(Boolean).join(", ") || designSpec.decorations.join(", ");
 
   return [
@@ -149,7 +150,12 @@ function buildThumbnailBackgroundPrompt({
     `Typography mood to complement: ${designSpec.typographyStyle}`,
     `Title placement plan: ${designSpec.titlePlacement}`,
     `Existing or recommended icon motifs to harmonize with, but not duplicate loudly: ${iconText}`,
-    `Use this palette naturally and softly: ${paletteText}`,
+    `Selected color family: ${designSpec.paletteLabel ?? designSpec.paletteFamily ?? "custom palette"}`,
+    "Use this exact role-based palette naturally and softly:",
+    paletteText,
+    "Do not introduce a new palette.",
+    "Do not default to generic teal, coral, sage green, beige, blue-gray, or rose wellness-brand colors unless those colors are explicitly present above.",
+    "Keep the background palette as a gentle extension of the selected title palette, with enough contrast for the title PNG to remain readable.",
     "",
     "Mood:",
     "- warm, professional, human-centered, relationship-centered",

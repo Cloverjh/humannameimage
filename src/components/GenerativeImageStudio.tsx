@@ -12,6 +12,7 @@ import {
 } from "@/lib/generativeOptions";
 import { getActualIconSpecs, getRecommendedIconSpecs } from "@/lib/iconAssets";
 import { createDownloadName, createSafeBaseName, downloadDataUrl } from "@/lib/imageDownload";
+import { defaultManualPalette } from "@/lib/paletteEngine";
 import { downloadAllIconsZip, downloadBackgroundZip, downloadFinalZip, downloadIconZip } from "@/lib/zipDownload";
 import type {
   CandidateId,
@@ -24,7 +25,9 @@ import type {
   IconAssetKind,
   IconSpec,
   ImageSize,
+  ManualPalette,
   OutputType,
+  PaletteColor,
   PngValidationStatus,
   ThumbnailBackgroundSpec
 } from "@/lib/generativeTypes";
@@ -127,6 +130,8 @@ type RequestImageOptions = {
 const primaryOutputOrder: OutputType[] = ["decorated-title", "title-only"];
 const checkerboardFailureMessage = "실제 투명 배경이 아닌 체크무늬가 감지되었습니다.";
 const thumbnailBackgroundSize = { width: 1920, height: 1440 };
+const recentColorFamiliesStorageKey = "education-title-recent-color-families";
+const maxRecentColorFamilies = 8;
 
 const initialResults = (): Record<OutputType, ImageResult> => ({
   "decorated-title": { outputType: "decorated-title", status: "idle" },
@@ -182,6 +187,7 @@ export function GenerativeImageStudio() {
   const thumbnailBackgroundsReady =
     thumbnailBackgrounds.length === 2 && thumbnailBackgrounds.every((result) => isValidBackgroundAsset(result.background));
   const finalZipReady = primaryResultsReady && actualIconsReady && recommendedIconsReady && thumbnailBackgroundsReady;
+  const manualPalette = form.manualPalette ?? defaultManualPalette;
 
   useEffect(() => {
     const storedCount = Number(window.localStorage.getItem(todayKey) ?? "0");
@@ -192,19 +198,32 @@ export function GenerativeImageStudio() {
     setForm((current) => ({ ...current, [key]: value }));
   };
 
+  const updateManualPalette = (updates: Partial<ManualPalette>) => {
+    updateField("manualPalette", { ...defaultManualPalette, ...manualPalette, ...updates });
+  };
+
   const generateCandidates = async () => {
     if (isGenerating) {
       return;
     }
 
     try {
-      const normalizedForm = normalizeForm(form, true);
+      const preparedCandidateSet = candidateSet;
+      const canUsePreparedPalettes = Boolean(
+        preparedCandidateSet && candidateList.every((candidate) => candidate.promptSet && !candidate.image)
+      );
+      const normalizedForm = normalizeForm(
+        { ...form, recentColorFamilies: getRecentColorFamilies() },
+        !canUsePreparedPalettes
+      );
       validateForm(normalizedForm);
       runStartedAtRef.current = performance.now();
       setForm(normalizedForm);
       setError("");
       setTimings([]);
-      setCandidateSet(null);
+      if (!canUsePreparedPalettes) {
+        setCandidateSet(null);
+      }
       setSelectedCandidateId(null);
       setPromptSet(null);
       setResults(initialResults());
@@ -214,29 +233,42 @@ export function GenerativeImageStudio() {
       setCandidates(markAllCandidates("generating"));
       setFlowState("generating-candidates");
       setIsGenerating(true);
-      setProgressText("1/7 꾸민 제목 1안과 2안을 만들고 있어요...");
+      setProgressText(
+        canUsePreparedPalettes
+          ? "1/7 추천된 색상 후보로 꾸민 제목 1안과 2안을 만들고 있어요..."
+          : "1/7 꾸민 제목 1안과 2안을 만들고 있어요..."
+      );
 
       const promptStartedAt = performance.now();
-      const promptResponse = await fetch("/api/generate-candidates", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(normalizedForm)
-      });
-      const promptData = await promptResponse.json();
-      const promptMs = performance.now() - promptStartedAt;
+      let nextCandidateSet = preparedCandidateSet;
 
-      if (promptResponse.status === 401) {
-        window.location.href = "/login";
-        return;
+      if (!canUsePreparedPalettes || !nextCandidateSet) {
+        const promptResponse = await fetch("/api/generate-candidates", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(normalizedForm)
+        });
+        const promptData = await promptResponse.json();
+
+        if (promptResponse.status === 401) {
+          window.location.href = "/login";
+          return;
+        }
+
+        if (!promptResponse.ok) {
+          throw new Error(promptData.error ?? "제목 시안 프롬프트 생성에 실패했습니다.");
+        }
+
+        nextCandidateSet = promptData.candidateSet as GeneratedCandidateSet;
       }
 
-      if (!promptResponse.ok) {
-        throw new Error(promptData.error ?? "제목 시안 프롬프트 생성에 실패했습니다.");
+      if (!nextCandidateSet) {
+        throw new Error("제목 시안 프롬프트 정보가 없습니다. 색상 추천을 다시 시도해 주세요.");
       }
 
-      addTiming("Prompt analysis", promptMs);
-      const nextCandidateSet = promptData.candidateSet as GeneratedCandidateSet;
+      addTiming(canUsePreparedPalettes ? "Palette recommendation reuse" : "Prompt analysis", performance.now() - promptStartedAt);
       setCandidateSet(nextCandidateSet);
+      rememberColorFamilies(getCandidateColorFamilies(nextCandidateSet));
 
       const draftStartedAt = performance.now();
       const candidateEntries = await Promise.all(
@@ -292,12 +324,79 @@ export function GenerativeImageStudio() {
     }
   };
 
+  const recommendPalettesOnly = async () => {
+    if (isGenerating) {
+      return;
+    }
+
+    try {
+      const normalizedForm = normalizeForm({ ...form, recentColorFamilies: getRecentColorFamilies() }, true);
+      validateForm(normalizedForm);
+      setForm(normalizedForm);
+      setError("");
+      setTimings([]);
+      setCandidateSet(null);
+      setSelectedCandidateId(null);
+      setPromptSet(null);
+      setResults(initialResults());
+      setActualIcons([]);
+      setRecommendedIcons([]);
+      setThumbnailBackgrounds([]);
+      setCandidates(initialCandidates());
+      setFlowState("generating-candidates");
+      setIsGenerating(true);
+      setProgressText("색상 후보만 다시 계산하고 있어요. 이미지 생성 비용은 쓰지 않습니다.");
+
+      const promptStartedAt = performance.now();
+      const promptResponse = await fetch("/api/generate-candidates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(normalizedForm)
+      });
+      const promptData = await promptResponse.json();
+
+      if (promptResponse.status === 401) {
+        window.location.href = "/login";
+        return;
+      }
+
+      if (!promptResponse.ok) {
+        throw new Error(promptData.error ?? "색상 후보 추천에 실패했습니다.");
+      }
+
+      const nextCandidateSet = promptData.candidateSet as GeneratedCandidateSet;
+      const nextCandidates = initialCandidates();
+
+      for (const candidateId of candidateOrder) {
+        nextCandidates[candidateId] = {
+          ...nextCandidates[candidateId],
+          promptSet: nextCandidateSet.candidates[candidateId],
+          status: "idle"
+        };
+      }
+
+      setCandidateSet(nextCandidateSet);
+      setCandidates(nextCandidates);
+      rememberColorFamilies(getCandidateColorFamilies(nextCandidateSet));
+      addTiming("Palette recommendation only", performance.now() - promptStartedAt);
+      setFlowState("awaiting-selection");
+      setProgressText("색상만 새로 추천했습니다. 마음에 드는 팔레트면 제목 시안 2안 생성하기를 눌러주세요.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "색상 후보 추천에 실패했습니다.");
+      setProgressText("");
+      setFlowState("idle");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   const selectCandidate = async (candidateId: CandidateId) => {
     const candidate = candidates[candidateId];
     if (!candidate.promptSet || !candidate.image || isGenerating) {
       return;
     }
 
+    rememberColorFamilies([candidate.promptSet.designSpec.paletteFamily ?? candidate.promptSet.designSpec.paletteLabel ?? ""]);
     setError("");
     setSelectedCandidateId(candidateId);
     setPromptSet(candidate.promptSet);
@@ -774,6 +873,59 @@ export function GenerativeImageStudio() {
               />
             </FormSection>
 
+            <FormSection title="색상 설정">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  className={`rounded-lg border px-3 py-2.5 text-sm font-extrabold transition ${
+                    !manualPalette.enabled
+                      ? "border-[#5F8F8B] bg-white text-[#527d79] shadow-sm"
+                      : "border-slate-200 bg-white/80 text-slate-600 hover:border-slate-300"
+                  }`}
+                  type="button"
+                  onClick={() => updateManualPalette({ enabled: false })}
+                >
+                  자동 추천
+                </button>
+                <button
+                  className={`rounded-lg border px-3 py-2.5 text-sm font-extrabold transition ${
+                    manualPalette.enabled
+                      ? "border-[#5F8F8B] bg-white text-[#527d79] shadow-sm"
+                      : "border-slate-200 bg-white/80 text-slate-600 hover:border-slate-300"
+                  }`}
+                  type="button"
+                  onClick={() => updateManualPalette({ enabled: true })}
+                >
+                  직접 색상 지정
+                </button>
+              </div>
+
+              {manualPalette.enabled ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <ColorInput
+                    label="Primary"
+                    value={manualPalette.primary}
+                    onChange={(value) => updateManualPalette({ primary: value })}
+                  />
+                  <ColorInput
+                    label="Secondary"
+                    value={manualPalette.secondary}
+                    onChange={(value) => updateManualPalette({ secondary: value })}
+                  />
+                  <ColorInput label="Accent" value={manualPalette.accent} onChange={(value) => updateManualPalette({ accent: value })} />
+                  <ColorInput
+                    label="Supporting"
+                    value={manualPalette.supporting}
+                    onChange={(value) => updateManualPalette({ supporting: value })}
+                  />
+                  <ColorInput label="Neutral" value={manualPalette.neutral} onChange={(value) => updateManualPalette({ neutral: value })} />
+                </div>
+              ) : (
+                <p className="rounded-lg bg-white px-3 py-3 text-xs font-bold leading-5 text-slate-500">
+                  교육명, 홍보문구, 주제, 대상자, 최근 사용 색상 이력을 함께 보고 1안과 2안에 서로 다른 컬러 패밀리를 추천합니다.
+                </p>
+              )}
+            </FormSection>
+
             <FormSection title="출력 크기">
               <div className="grid gap-2">
                 {sizeOptions.map((option) => (
@@ -814,6 +966,14 @@ export function GenerativeImageStudio() {
                   {progressText}
                 </div>
               ) : null}
+              <button
+                className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm font-extrabold text-slate-700 transition hover:border-[#5F8F8B] disabled:cursor-wait disabled:opacity-60"
+                disabled={isGenerating}
+                type="button"
+                onClick={recommendPalettesOnly}
+              >
+                색상만 다시 추천
+              </button>
             </section>
           </div>
         </aside>
@@ -1217,6 +1377,7 @@ function CandidateCard({
             {result.image.model} · {result.image.operation ?? "generation"} · {formatSeconds(result.image.timings?.totalMs ?? 0)}
           </p>
         ) : null}
+        <PaletteSwatches promptSet={result.promptSet} />
         {result.image ? <ValidationMeta image={result.image} /> : null}
 
         <div className="flex flex-wrap gap-2">
@@ -1245,6 +1406,51 @@ function CandidateCard({
         </div>
       </div>
     </article>
+  );
+}
+
+function PaletteSwatches({ promptSet }: { promptSet?: GeneratedPromptSet }) {
+  const spec = promptSet?.designSpec;
+
+  if (!spec || spec.palette.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs font-black text-slate-700">{spec.paletteLabel ?? spec.paletteFamily ?? "추천 팔레트"}</p>
+        <p className="text-[11px] font-extrabold text-slate-400">
+          다양성 {formatScore(spec.paletteScore)}
+          {typeof spec.paletteDistanceFromOption1 === "number"
+            ? ` · 1안 대비 거리 ${Math.round(spec.paletteDistanceFromOption1 * 100)}`
+            : ""}
+        </p>
+      </div>
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        {spec.palette.map((color) => (
+          <PaletteChip key={`${color.role}-${color.hex}`} color={color} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PaletteChip({ color }: { color: PaletteColor }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2 rounded-md bg-white px-2 py-1.5">
+      <span
+        aria-hidden="true"
+        className="h-5 w-5 shrink-0 rounded-full border border-slate-200"
+        style={{ backgroundColor: color.hex }}
+      />
+      <span className="min-w-0">
+        <span className="block truncate text-[11px] font-black uppercase text-slate-500">{color.role ?? "color"}</span>
+        <span className="block truncate text-xs font-extrabold text-slate-800">
+          {color.hex} · {color.name}
+        </span>
+      </span>
+    </div>
   );
 }
 
@@ -1662,6 +1868,35 @@ function TextInput({
   );
 }
 
+function ColorInput({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  const safeColor = isHexColor(value) ? value : "#000000";
+
+  return (
+    <label className="block">
+      <Label>{label}</Label>
+      <div className="mt-2 flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-2">
+        <input
+          aria-label={`${label} 색상`}
+          className="h-9 w-10 shrink-0 cursor-pointer rounded-md border border-slate-200 bg-white"
+          type="color"
+          value={safeColor}
+          onChange={(event) => onChange(event.target.value.toUpperCase())}
+        />
+        <input
+          className="min-w-0 flex-1 bg-transparent text-sm font-extrabold uppercase tracking-[-0.02em] text-slate-700 outline-none"
+          value={value}
+          onChange={(event) => {
+            const nextValue = normalizeHexInput(event.target.value);
+            if (isHexColor(nextValue)) {
+              onChange(nextValue);
+            }
+          }}
+        />
+      </div>
+    </label>
+  );
+}
+
 function TextArea({
   label,
   value,
@@ -1779,7 +2014,9 @@ function normalizeForm(form: EducationImageForm, refreshStyle: boolean): Educati
     textMode: "with-text",
     quality: "high",
     size: form.size,
-    styleSeed: refreshStyle ? Date.now() : form.styleSeed || Date.now()
+    styleSeed: refreshStyle ? Date.now() : form.styleSeed || Date.now(),
+    recentColorFamilies: (form.recentColorFamilies ?? []).filter(Boolean).slice(0, maxRecentColorFamilies),
+    manualPalette: form.manualPalette
   };
 }
 
@@ -1835,4 +2072,63 @@ function formatSeconds(ms: number) {
   }
 
   return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function formatScore(value?: number) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "-";
+  }
+
+  return `${Math.round(value * 100)}`;
+}
+
+function normalizeHexInput(value: string) {
+  const clean = value.trim().replace(/[^0-9a-fA-F#]/g, "");
+  const withHash = clean.startsWith("#") ? clean : `#${clean}`;
+  const hex = withHash.slice(0, 7).toUpperCase();
+
+  if (/^#[0-9A-F]{6}$/.test(hex)) {
+    return hex;
+  }
+
+  return hex;
+}
+
+function isHexColor(value: string) {
+  return /^#[0-9A-Fa-f]{6}$/.test(value);
+}
+
+function getRecentColorFamilies() {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(recentColorFamiliesStorageKey) ?? "[]");
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.filter((item): item is string => typeof item === "string" && item.length > 0).slice(0, maxRecentColorFamilies);
+  } catch {
+    return [];
+  }
+}
+
+function rememberColorFamilies(families: string[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const next = Array.from(new Set([...families.filter(Boolean), ...getRecentColorFamilies()])).slice(0, maxRecentColorFamilies);
+  window.localStorage.setItem(recentColorFamiliesStorageKey, JSON.stringify(next));
+}
+
+function getCandidateColorFamilies(candidateSet: GeneratedCandidateSet) {
+  return candidateOrder
+    .map((candidateId) => {
+      const spec = candidateSet.candidates[candidateId]?.designSpec;
+      return spec.paletteFamily ?? spec.paletteLabel ?? "";
+    })
+    .filter(Boolean);
 }

@@ -1,13 +1,29 @@
 export function getOpenAIErrorMessage(data: unknown, fallback: string) {
   const message = (data as { error?: { message?: string; code?: string; type?: string } }).error?.message;
   const code = (data as { error?: { code?: string } }).error?.code;
-  const rawMessage = message ? `${fallback} ${message}` : fallback;
+  const rawMessage = message ?? fallback;
 
-  return normalizeOpenAIError(rawMessage, code);
+  return normalizeOpenAIError(rawMessage, code, fallback);
 }
 
-export function normalizeOpenAIError(message: string, code?: string) {
+export function getOpenAIErrorForUser(error: unknown, fallback: string) {
+  const code =
+    typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : undefined;
+  const status =
+    typeof error === "object" && error !== null && "status" in error && typeof error.status === "number"
+      ? error.status
+      : undefined;
+  const message = error instanceof Error ? error.message : fallback;
+
+  return normalizeOpenAIError(message, code, fallback, status);
+}
+
+export function normalizeOpenAIError(message: string, code?: string, fallback = "OpenAI API 요청에 실패했습니다.", status?: number) {
   const lowerMessage = message.toLowerCase();
+
+  if (lowerMessage.includes("openai_api_key_missing")) {
+    return "OPENAI_API_KEY_MISSING: OPENAI_API_KEY를 설정해야 생성 기능을 사용할 수 있습니다.";
+  }
 
   if (
     code === "insufficient_quota" ||
@@ -21,13 +37,33 @@ export function normalizeOpenAIError(message: string, code?: string) {
     ].join(" ");
   }
 
+  if (
+    code === "model_not_found" ||
+    lowerMessage.includes("model_not_found") ||
+    lowerMessage.includes("does not exist") ||
+    lowerMessage.includes("model") && lowerMessage.includes("not available")
+  ) {
+    return "MODEL_NOT_AVAILABLE: 현재 프로젝트에서 요청한 OpenAI 모델을 사용할 수 없습니다. 모델 권한과 프로젝트 설정을 확인해 주세요.";
+  }
+
   if (lowerMessage.includes("incorrect api key") || lowerMessage.includes("invalid api key")) {
     return "OpenAI API Key가 올바르지 않습니다. .env.local의 OPENAI_API_KEY 값에 오타나 앞뒤 공백이 없는지 확인해 주세요.";
   }
 
-  if (lowerMessage.includes("rate limit")) {
-    return "OpenAI API 요청 속도 제한에 걸렸습니다. 잠시 후 다시 시도하거나 품질/생성 빈도를 낮춰 주세요.";
+  if (
+    code === "invalid_request_error" ||
+    status === 400 ||
+    lowerMessage.includes("unsupported") ||
+    lowerMessage.includes("invalid") ||
+    lowerMessage.includes("background") ||
+    lowerMessage.includes("parameter")
+  ) {
+    return "INVALID_IMAGE_PARAMETER: 이미지 생성 파라미터가 현재 모델 또는 계정에서 지원되지 않습니다. 잠시 후 다시 시도하거나 관리자에게 알려 주세요.";
   }
 
-  return message;
+  if (status === 429 || lowerMessage.includes("rate limit")) {
+    return "RATE_LIMITED: OpenAI API 요청 속도 제한에 걸렸습니다. 잠시 후 다시 시도해 주세요.";
+  }
+
+  return fallback;
 }

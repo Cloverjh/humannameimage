@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireAuthenticated } from "@/lib/auth";
 import { getIconFileName } from "@/lib/iconAssets";
 import { chooseImageModel, requestImageEdit } from "@/lib/openaiImageApi";
+import { formatPaletteForPrompt } from "@/lib/paletteEngine";
 import { prepareIconPng } from "@/lib/serverImageProcessing";
 import type { DesignSpec, EducationImageForm, GeneratedIconAsset, IconSpec, PngValidationStatus } from "@/lib/generativeTypes";
 
@@ -169,13 +170,13 @@ function buildRecommendedIconPrompt({
   iconSpec: IconSpec;
   actualIconNames: string[];
 }) {
-  const paletteText = designSpec.palette.map((color) => `${color.hex} (${color.usage})`).join(", ");
+  const paletteText = formatPaletteForPrompt(designSpec.palette);
 
   return [
     "Create one isolated decorative icon inspired by the selected decorated Korean title design.",
     "",
     "Reference style:",
-    "- Same color palette as the selected title design",
+    "- Same role-based color palette as the selected title design",
     "- Same line thickness",
     "- Same roundedness",
     "- Same fill style",
@@ -194,10 +195,16 @@ function buildRecommendedIconPrompt({
     `Core topics: ${form.topics.join(", ")}`,
     `Education field: ${designSpec.topicCategory}`,
     `Core keywords: ${designSpec.keywords.join(", ")}`,
-    `Palette: ${paletteText}`,
+    `Selected color family: ${designSpec.paletteLabel ?? designSpec.paletteFamily ?? "custom palette"}`,
+    "Use only this selected palette system:",
+    paletteText,
     `Typography mood: ${designSpec.typographyStyle}`,
     "",
     "Create one complementary icon that is not a duplicate of the actual icons.",
+    "Do not introduce a new palette.",
+    "Do not default to generic teal, coral, sage green, beige, blue-gray, or rose wellness-brand colors unless those colors are explicitly present above.",
+    "Use selectedPalette.primary, selectedPalette.secondary, selectedPalette.accent, and selectedPalette.supporting only.",
+    "Preserve clear hue contrast between the icon fill, outline, and small accent marks.",
     "",
     "Use a true transparent alpha background.",
     "If native alpha is not available, use one single flat pure magenta #FF00FF chroma-key background only.",

@@ -4,6 +4,7 @@ import {
   candidateOrder,
   parseImageSize
 } from "@/lib/generativeOptions";
+import { chooseCandidatePalettes, formatPaletteForPrompt, type PaletteChoice } from "@/lib/paletteEngine";
 import type {
   CandidateId,
   DesignSpec,
@@ -42,93 +43,6 @@ const candidateVariants: Record<CandidateId, CandidateVariant> = {
     seedOffset: 47,
     warmth: "structured"
   }
-};
-
-const palettePresets: Record<Classification, PaletteColor[][]> = {
-  counseling: [
-    [
-      { name: "딥 블루그레이", hex: "#40506F", usage: "제목 메인 컬러" },
-      { name: "따뜻한 로즈", hex: "#D7837E", usage: "강조 단어" },
-      { name: "세이지 그린", hex: "#8FB285", usage: "작은 관계 장식" },
-      { name: "잉크 네이비", hex: "#1E2430", usage: "가독성 보조" }
-    ],
-    [
-      { name: "코발트 블루", hex: "#2867B2", usage: "전문성" },
-      { name: "코랄", hex: "#F26D5B", usage: "핵심 단어 강조" },
-      { name: "민트", hex: "#8FD0BD", usage: "얇은 선 장식" },
-      { name: "딥 네이비", hex: "#162033", usage: "외곽과 대비" }
-    ]
-  ],
-  community: [
-    [
-      { name: "티크 그린", hex: "#5F8F8B", usage: "제목 메인 컬러" },
-      { name: "웜 코랄", hex: "#F2A36B", usage: "따뜻한 강조" },
-      { name: "리프 그린", hex: "#8BBE57", usage: "잎사귀와 연결감" },
-      { name: "딥 차콜", hex: "#263238", usage: "가독성 보조" }
-    ],
-    [
-      { name: "포레스트", hex: "#357A55", usage: "제목 메인 컬러" },
-      { name: "피치", hex: "#FF9B73", usage: "관계의 온기" },
-      { name: "버터 옐로", hex: "#F4CF5D", usage: "작은 포인트" },
-      { name: "차콜", hex: "#272B2F", usage: "선명한 외곽" }
-    ]
-  ],
-  practice: [
-    [
-      { name: "시그널 블루", hex: "#2F80ED", usage: "제목 메인 컬러" },
-      { name: "액션 오렌지", hex: "#FF9F1C", usage: "실행감 강조" },
-      { name: "프레시 그린", hex: "#78C6A3", usage: "체크 아이콘" },
-      { name: "그래파이트", hex: "#20242A", usage: "가독성 보조" }
-    ],
-    [
-      { name: "네이비", hex: "#1D3557", usage: "전문적인 제목" },
-      { name: "오렌지", hex: "#F77F00", usage: "핵심 실행감" },
-      { name: "시안", hex: "#4CC9F0", usage: "기술/도구 사인" },
-      { name: "블랙", hex: "#111827", usage: "선명한 외곽" }
-    ]
-  ],
-  promotion: [
-    [
-      { name: "코랄 핑크", hex: "#E95D75", usage: "제목 메인 컬러" },
-      { name: "잉크 블랙", hex: "#151515", usage: "가독성 보조" },
-      { name: "레몬", hex: "#F4D35E", usage: "작은 반짝 장식" },
-      { name: "블루", hex: "#357DED", usage: "정보성 사인" }
-    ],
-    [
-      { name: "청록", hex: "#2A9D8F", usage: "제목 메인 컬러" },
-      { name: "코랄", hex: "#E76F51", usage: "따뜻한 강조" },
-      { name: "샌드", hex: "#E9C46A", usage: "소량 장식" },
-      { name: "차콜", hex: "#22223B", usage: "외곽과 대비" }
-    ]
-  ],
-  reflective: [
-    [
-      { name: "딥 플럼", hex: "#5E5166", usage: "제목 메인 컬러" },
-      { name: "더스티 로즈", hex: "#C58C84", usage: "따뜻한 강조" },
-      { name: "뮤트 옐로", hex: "#EACD68", usage: "작은 사인" },
-      { name: "차콜", hex: "#2F2F35", usage: "가독성 보조" }
-    ],
-    [
-      { name: "슬레이트", hex: "#52616B", usage: "차분한 제목" },
-      { name: "테라코타", hex: "#C97064", usage: "성찰의 온기" },
-      { name: "올리브", hex: "#9DA65D", usage: "작은 장식" },
-      { name: "잉크", hex: "#202124", usage: "선명한 외곽" }
-    ]
-  ],
-  care: [
-    [
-      { name: "케어 그린", hex: "#6BAA75", usage: "제목 메인 컬러" },
-      { name: "웜 오렌지", hex: "#F4A259", usage: "따뜻한 강조" },
-      { name: "소프트 블루", hex: "#7EA8BE", usage: "안정감 사인" },
-      { name: "브라운 차콜", hex: "#2E2A25", usage: "가독성 보조" }
-    ],
-    [
-      { name: "세이지", hex: "#7A9E7E", usage: "제목 메인 컬러" },
-      { name: "살몬", hex: "#E5989B", usage: "부드러운 강조" },
-      { name: "페일 블루", hex: "#9BC4CB", usage: "작은 장식" },
-      { name: "딥 브라운", hex: "#2D2522", usage: "선명한 외곽" }
-    ]
-  ]
 };
 
 const softTypographyStyles = [
@@ -246,10 +160,12 @@ const sharedAvoid = [
 
 export function buildCandidatePromptSets(form: EducationImageForm): GeneratedCandidateSet {
   const normalizedForm = normalizePromptForm(form);
+  const category = classifyEducation(normalizedForm);
+  const paletteChoices = chooseCandidatePalettes(normalizedForm, category, candidateVariants);
   const candidates = Object.fromEntries(
     candidateOrder.map((candidateId) => {
       const variant = candidateVariants[candidateId];
-      const promptSet = buildPromptSetForVariant(normalizedForm, variant);
+      const promptSet = buildPromptSetForVariant(normalizedForm, variant, paletteChoices[candidateId]);
       return [candidateId, promptSet];
     })
   ) as Record<CandidateId, GeneratedPromptSet>;
@@ -264,7 +180,10 @@ export function buildCandidatePromptSets(form: EducationImageForm): GeneratedCan
 }
 
 export function buildPromptSet(form: EducationImageForm): GeneratedPromptSet {
-  return buildPromptSetForVariant(normalizePromptForm(form), candidateVariants["option-1"]);
+  const normalizedForm = normalizePromptForm(form);
+  const category = classifyEducation(normalizedForm);
+  const paletteChoices = chooseCandidatePalettes(normalizedForm, category, candidateVariants);
+  return buildPromptSetForVariant(normalizedForm, candidateVariants["option-1"], paletteChoices["option-1"]);
 }
 
 export function buildPromptLocally(form: EducationImageForm): GeneratedPrompt {
@@ -280,8 +199,8 @@ export function isTransparentOutput(outputType: string): outputType is OutputTyp
   return outputType === "decorated-title" || outputType === "title-only" || outputType === "icons-only";
 }
 
-function buildPromptSetForVariant(form: EducationImageForm, variant: CandidateVariant): GeneratedPromptSet {
-  const designSpec = createDesignSpec(form, variant);
+function buildPromptSetForVariant(form: EducationImageForm, variant: CandidateVariant, paletteChoice?: PaletteChoice): GeneratedPromptSet {
+  const designSpec = createDesignSpec(form, variant, paletteChoice);
   const prompts: Record<OutputType, GeneratedPrompt> = {
     "decorated-title": buildPromptFromSpec(form, designSpec, "decorated-title"),
     "title-only": buildPromptFromSpec(form, designSpec, "title-only"),
@@ -309,14 +228,16 @@ function normalizePromptForm(form: EducationImageForm): EducationImageForm {
     textMode: form.textMode || "with-text",
     quality: "high",
     size: form.size,
-    styleSeed: form.styleSeed || Date.now()
+    styleSeed: form.styleSeed || Date.now(),
+    recentColorFamilies: (form.recentColorFamilies ?? []).filter(Boolean).slice(0, 8),
+    manualPalette: form.manualPalette
   };
 }
 
-function createDesignSpec(form: EducationImageForm, variant: CandidateVariant): DesignSpec {
+function createDesignSpec(form: EducationImageForm, variant: CandidateVariant, paletteChoice?: PaletteChoice): DesignSpec {
   const category = classifyEducation(form);
   const seed = Math.abs(form.styleSeed + variant.seedOffset);
-  const palette = pickPalette(category, seed, variant);
+  const palette = paletteChoice?.palette ?? [];
   const typographyStyle = pickTypography(seed, variant);
   const decorations = pickDecorations(category, seed, variant);
   const keywords = getKeywords(form, category).slice(0, 5);
@@ -338,6 +259,10 @@ function createDesignSpec(form: EducationImageForm, variant: CandidateVariant): 
     topicCategory: category,
     visualMetaphor: getVisualMetaphor(category),
     palette,
+    paletteFamily: paletteChoice?.familyId,
+    paletteLabel: paletteChoice?.label ?? paletteChoice?.familyName,
+    paletteScore: paletteChoice?.score,
+    paletteDistanceFromOption1: paletteChoice?.distanceFromOption1,
     typographyStyle,
     lineBreakPlan: getLineBreakPlan(form.title, form.size),
     titlePlacement,
@@ -379,7 +304,7 @@ function buildPromptFromSpec(form: EducationImageForm, spec: DesignSpec, outputT
 
 function createImagePrompt(form: EducationImageForm, spec: DesignSpec, outputType: OutputType) {
   const title = form.title.trim();
-  const paletteText = spec.palette.map((color) => `${color.hex} for ${color.usage}`).join("; ");
+  const paletteText = formatPaletteForPrompt(spec.palette);
   const trueTransparencyRules = [
     "Use a true transparent alpha background.",
     "IMPORTANT:",
@@ -403,7 +328,9 @@ function createImagePrompt(form: EducationImageForm, spec: DesignSpec, outputTyp
     `Title: "${title}"`,
     `Core emotions: ${spec.coreEmotions.join(", ")}`,
     `Keywords: ${spec.keywords.join(", ")}`,
-    `Recommended colors: ${paletteText}`,
+    `Selected color family: ${spec.paletteLabel ?? spec.paletteFamily ?? "custom palette"}`,
+    "Color system:",
+    paletteText,
     `Recommended icons: ${spec.decorations.join(", ")}`,
     `Emphasis words: ${spec.emphasisWords.join(", ")}`,
     `Title line breaks: ${spec.lineBreakPlan}`,
@@ -416,6 +343,10 @@ function createImagePrompt(form: EducationImageForm, spec: DesignSpec, outputTyp
     "Create an isolated reusable Korean education-promotion PNG asset.",
     trueTransparencyRules,
     "The final image must be title-centered, readable in Korean, and not crowded.",
+    "Use the specified color system as a primary design constraint.",
+    "Do not replace this palette with generic teal, coral, sage green, beige, blue-gray, or rose wellness-brand colors unless those exact colors are explicitly selected in the color system.",
+    "Preserve clear hue contrast between the main headline, secondary headline accent, small decorative icons, and supporting details.",
+    "Maintain noticeable color differentiation. Do not let all colors drift toward the same green-blue family.",
     "Use flatter clean display lettering, not glossy 3D lettering.",
     "Do not fill empty counters or inner holes of Korean letters with white or gray paint; those empty spaces must be transparent alpha.",
     "Avoid heavy black shadows, stacked outline noise, bevels, shine streaks, and glossy highlights.",
@@ -483,12 +414,6 @@ function createImagePrompt(form: EducationImageForm, spec: DesignSpec, outputTyp
     "Do not invent a new icon set. Do not add unrelated icons. Derive this layer from the provided input image.",
     "Quality must be high."
   ].join("\n");
-}
-
-function pickPalette(classification: Classification, seed: number, variant: CandidateVariant) {
-  const palettes = palettePresets[classification] ?? palettePresets.community;
-  const index = Math.abs(seed + (variant.warmth === "structured" ? 1 : 0)) % palettes.length;
-  return palettes[index];
 }
 
 function pickTypography(seed: number, variant: CandidateVariant) {

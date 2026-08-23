@@ -3,6 +3,16 @@ export type CandidateId = "option-1" | "option-2";
 export type TextMode = "with-text" | "without-text";
 export type ImageQuality = "high";
 export type ImageSize = "1500x730" | "1500x416" | "1500x1500";
+export type PaletteRole = "primary" | "secondary" | "accent" | "supporting" | "neutral";
+
+export interface ManualPalette {
+  enabled: boolean;
+  primary: string;
+  secondary: string;
+  accent: string;
+  supporting: string;
+  neutral: string;
+}
 
 export interface EducationImageForm {
   title: string;
@@ -14,12 +24,16 @@ export interface EducationImageForm {
   quality: ImageQuality;
   size: ImageSize;
   styleSeed: number;
+  recentColorFamilies?: string[];
+  manualPalette?: ManualPalette;
 }
 
 export interface PaletteColor {
   name: string;
   hex: string;
   usage: string;
+  role?: PaletteRole;
+  family?: string;
 }
 
 export interface DesignSpec {
@@ -33,6 +47,10 @@ export interface DesignSpec {
   topicCategory: string;
   visualMetaphor: string;
   palette: PaletteColor[];
+  paletteFamily?: string;
+  paletteLabel?: string;
+  paletteScore?: number;
+  paletteDistanceFromOption1?: number;
   typographyStyle: string;
   lineBreakPlan: string;
   titlePlacement: string;

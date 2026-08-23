@@ -1,15 +1,11 @@
-import { getOpenAIErrorMessage } from "@/lib/openaiErrors";
+import { getOpenAIClient } from "@/lib/openaiClient";
+import { getOpenAIErrorForUser } from "@/lib/openaiErrors";
+import { getImageEditModel, getImageGenerationModel } from "@/lib/openai-models";
 import { dataUrlToBuffer } from "@/lib/serverImageProcessing";
 import type { OutputType } from "@/lib/generativeTypes";
+import type { ImageEditParamsNonStreaming, ImageGenerateParamsNonStreaming, ImagesResponse } from "openai/resources/images";
 
-export type OpenAIImageResponse = {
-  data?: Array<{
-    b64_json?: string;
-    revised_prompt?: string;
-  }>;
-  usage?: unknown;
-  background?: "transparent" | "opaque" | "auto";
-};
+export type OpenAIImageResponse = ImagesResponse;
 
 type RequestImageGenerationOptions = {
   apiPrompt: string;
@@ -24,17 +20,15 @@ type RequestImageEditOptions = RequestImageGenerationOptions & {
 };
 
 export function chooseImageModel(outputType?: OutputType | "recommended-icon" | "thumbnail-background") {
-  void outputType;
-
-  if (process.env.OPENAI_IMAGE_MODEL) {
-    return process.env.OPENAI_IMAGE_MODEL;
+  if (outputType === "title-only" || outputType === "icons-only" || outputType === "recommended-icon") {
+    return getImageEditModel();
   }
 
-  return "gpt-image-2";
+  return getImageGenerationModel();
 }
 
 export function supportsTransparentBackground(model: string) {
-  return !model.startsWith("gpt-image-2");
+  return model.startsWith("gpt-image-");
 }
 
 export async function requestImageGeneration({
@@ -43,36 +37,23 @@ export async function requestImageGeneration({
   model,
   transparentRequested
 }: RequestImageGenerationOptions) {
-  const requestBody: Record<string, unknown> = {
+  const requestBody: ImageGenerateParamsNonStreaming = {
     model,
     prompt: apiPrompt,
     n: 1,
     size: apiSize,
     quality: "high",
-    output_format: "png"
+    output_format: "png",
+    stream: false,
+    background: transparentRequested && supportsTransparentBackground(model) ? "transparent" : "auto"
   };
 
-  if (transparentRequested && supportsTransparentBackground(model)) {
-    requestBody.background = "transparent";
-  } else if (supportsTransparentBackground(model)) {
-    requestBody.background = "auto";
+  try {
+    return await getOpenAIClient().images.generate(requestBody);
+  } catch (error) {
+    console.error("OpenAI image generation failed", error);
+    throw new Error(getOpenAIErrorForUser(error, "IMAGE_GENERATION_FAILED: 이미지 생성 요청에 실패했습니다."));
   }
-
-  const response = await fetch("https://api.openai.com/v1/images/generations", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(requestBody)
-  });
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(getOpenAIErrorMessage(data, "OpenAI 이미지 생성 API 요청에 실패했습니다."));
-  }
-
-  return data as OpenAIImageResponse;
 }
 
 export async function requestImageEdit({
@@ -84,31 +65,23 @@ export async function requestImageEdit({
   fileName = "selected-decorated-title.png"
 }: RequestImageEditOptions) {
   const source = dataUrlToBuffer(inputImageDataUrl);
-  const formData = new FormData();
-  formData.set("model", model);
-  formData.set("prompt", apiPrompt);
-  formData.set("n", "1");
-  formData.set("size", apiSize);
-  formData.set("quality", "high");
-  formData.set("output_format", "png");
-  formData.set("image", new File([source.buffer], fileName, { type: source.mimeType }));
+  const requestBody: ImageEditParamsNonStreaming = {
+    model,
+    prompt: apiPrompt,
+    n: 1,
+    size: apiSize,
+    quality: "high",
+    output_format: "png",
+    input_fidelity: "high",
+    stream: false,
+    background: transparentRequested && supportsTransparentBackground(model) ? "transparent" : "auto",
+    image: new File([source.buffer], fileName, { type: source.mimeType })
+  };
 
-  if (transparentRequested && supportsTransparentBackground(model)) {
-    formData.set("background", "transparent");
+  try {
+    return await getOpenAIClient().images.edit(requestBody);
+  } catch (error) {
+    console.error("OpenAI image edit failed", error);
+    throw new Error(getOpenAIErrorForUser(error, "IMAGE_EDIT_FAILED: 이미지 편집 요청에 실패했습니다."));
   }
-
-  const response = await fetch("https://api.openai.com/v1/images/edits", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
-    },
-    body: formData
-  });
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(getOpenAIErrorMessage(data, "OpenAI 이미지 편집 API 요청에 실패했습니다."));
-  }
-
-  return data as OpenAIImageResponse;
 }

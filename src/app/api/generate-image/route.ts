@@ -31,16 +31,6 @@ const transparentFinalReminder = [
   "If the model cannot encode alpha, leave only a plain removable edge background with no texture or pattern."
 ].join("\n");
 
-const chromaKeyFinalReminder = [
-  "Final reminder: quality must be high.",
-  "The image model may not support native alpha transparency, so use a removable chroma-key background.",
-  "Use one single flat pure magenta background: #FF00FF.",
-  "Do not use magenta, pink-magenta, or #FF00FF anywhere in the Korean title, outline, shadow, icon, decoration, or highlight.",
-  "All empty spaces inside Korean letters, including counters/holes, must show the same pure magenta #FF00FF background so the server can remove it.",
-  "No checkerboard, no gray/white transparency preview, no paper texture, no card, no panel, no frame.",
-  "Keep the Korean title AI-drawn, clean, readable, flat, and not glossy."
-].join("\n");
-
 export async function POST(request: Request) {
   if (!(await requireAuthenticated())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -216,5 +206,6 @@ function getValidationFailureMessage(status: PngValidationStatus) {
 }
 
 function getTransparentReminder(model: string) {
-  return model.startsWith("gpt-image-2") ? chromaKeyFinalReminder : transparentFinalReminder;
+  void model;
+  return transparentFinalReminder;
 }
