@@ -22,7 +22,7 @@ export interface RecolorMetadata {
   palette: PaletteRoleMap;
   preservedLayout: boolean;
   preservedLineBreaks: boolean;
-  method: "server-recolor" | "image-edit";
+  method: "client-recolor" | "server-recolor" | "image-edit";
   createdAt: string;
   sourceImageId?: string;
   options?: {
@@ -30,8 +30,10 @@ export interface RecolorMetadata {
     iconColors: boolean;
     decorationColors: boolean;
     emphasisColors: boolean;
+    outlineColors?: boolean;
   };
   extractedColors?: string[];
+  colorRoles?: Record<string, number>;
 }
 
 export interface EducationImageForm {
@@ -184,7 +186,7 @@ export interface GeneratedIconAsset {
   sourceImageId?: string;
   sourceComponentIndex?: number;
   model?: string;
-  operation?: "server-extract" | "server-recolor" | "edit" | "generation";
+  operation?: "server-extract" | "client-recolor" | "server-recolor" | "edit" | "generation";
   prompt?: string;
   validationStatus?: PngValidationStatus;
   validation?: PngValidationResult;
@@ -236,7 +238,7 @@ export interface GeneratedImage {
   background?: "transparent" | "opaque" | "auto";
   apiSize?: string;
   sourceImageId?: string;
-  operation?: "generation" | "edit" | "server-recolor";
+  operation?: "generation" | "edit" | "client-recolor" | "server-recolor";
   validationStatus?: PngValidationStatus;
   validation?: PngValidationResult;
   corrected?: boolean;

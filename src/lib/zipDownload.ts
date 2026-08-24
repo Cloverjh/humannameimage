@@ -118,6 +118,7 @@ export function downloadFinalZip({
             selectedOption: decoratedTitle.prompt.designSpec.candidateId,
             selectedOptionLabel: decoratedTitle.prompt.designSpec.candidateLabel,
             palette: decoratedTitle.recolor?.palette ?? paletteToRoleMap(decoratedTitle.prompt.designSpec.palette),
+            colorRoles: decoratedTitle.recolor?.colorRoles ?? titleOnly.recolor?.colorRoles ?? null,
             preservedLayout: decoratedTitle.recolor?.preservedLayout ?? true,
             preservedLineBreaks: decoratedTitle.recolor?.preservedLineBreaks ?? true,
             recolor: decoratedTitle.recolor ?? titleOnly.recolor ?? null,
