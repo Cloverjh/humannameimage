@@ -5,6 +5,62 @@ export type ImageQuality = "high";
 export type ImageSize = "1500x730" | "1500x416" | "1500x1500";
 export type PaletteRole = "primary" | "secondary" | "accent" | "supporting" | "neutral";
 
+export type DesignStyleFamily =
+  | "editorial"
+  | "bold-type"
+  | "hand-drawn"
+  | "geometric"
+  | "sticker"
+  | "minimal"
+  | "diagram"
+  | "experimental";
+
+export type DesignComposition =
+  | "left-asymmetric"
+  | "right-asymmetric"
+  | "center-stacked"
+  | "split"
+  | "diagonal-flow"
+  | "modular-grid"
+  | "top-heavy";
+
+export type DesignTypography =
+  | "editorial"
+  | "condensed"
+  | "rounded"
+  | "marker"
+  | "geometric"
+  | "outline"
+  | "massive";
+
+export type DesignGraphicLanguage =
+  | "abstract-shapes"
+  | "line-art"
+  | "semantic-icons"
+  | "geometric-symbols"
+  | "collage-cutout"
+  | "diagrammatic"
+  | "marker-doodles"
+  | "none";
+
+export type DesignDensity = "minimal" | "balanced" | "rich";
+export type DesignEmphasis = "size-hierarchy" | "color-block" | "underline" | "outline" | "rotation" | "highlight-shape";
+export type DesignShapeLanguage = "rounded" | "angular" | "organic" | "geometric";
+
+export interface DesignDNA {
+  styleFamily: DesignStyleFamily;
+  composition: DesignComposition;
+  typography: DesignTypography;
+  graphicLanguage: DesignGraphicLanguage;
+  density: DesignDensity;
+  emphasis: DesignEmphasis;
+  shapeLanguage: DesignShapeLanguage;
+  mood: string;
+  label: string;
+  rationale: string;
+  noveltyKey: string;
+}
+
 export interface ManualPalette {
   enabled: boolean;
   primary: string;
@@ -47,6 +103,8 @@ export interface EducationImageForm {
   size: ImageSize;
   styleSeed: number;
   recentColorFamilies?: string[];
+  recentDesignSignatures?: string[];
+  designDNAOverrides?: Partial<Record<CandidateId, DesignDNA>>;
   manualPalette?: ManualPalette;
 }
 
@@ -63,10 +121,14 @@ export interface DesignSpec {
   candidateId?: CandidateId;
   candidateLabel?: string;
   variantDirection?: string;
+  designDNA: DesignDNA;
   coreEmotions: string[];
   coreEmotion: string;
   keywords: string[];
   topicCategory: string;
+  topicCategories?: string[];
+  contentSummary?: string;
+  audienceIntent?: string;
   visualMetaphor: string;
   palette: PaletteColor[];
   paletteFamily?: string;
