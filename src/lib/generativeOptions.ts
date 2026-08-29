@@ -11,8 +11,8 @@ export const candidateLabelMap: Record<CandidateId, string> = {
 };
 
 export const candidateDirectionMap: Record<CandidateId, string> = {
-  "option-1": "따뜻하고 부드러운 관계 중심 스타일",
-  "option-2": "정돈되고 전문적인 실무 중심 스타일"
+  "option-1": "교육 내용 기반 Design DNA 1안",
+  "option-2": "1안과 시각 구조가 다른 Design DNA 2안"
 };
 
 export const outputTypeLabelMap: Record<OutputType, string> = {

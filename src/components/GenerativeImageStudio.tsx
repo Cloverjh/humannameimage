@@ -23,6 +23,7 @@ import { colorFamilyLibrary, defaultManualPalette } from "@/lib/paletteEngine";
 import { downloadAllIconsZip, downloadBackgroundZip, downloadFinalZip, downloadIconZip } from "@/lib/zipDownload";
 import type {
   CandidateId,
+  DesignDNA,
   EducationImageForm,
   GeneratedBackgroundAsset,
   GeneratedCandidateSet,
@@ -191,7 +192,9 @@ const primaryOutputOrder: OutputType[] = ["decorated-title", "title-only"];
 const checkerboardFailureMessage = "실제 투명 배경이 아닌 체크무늬가 감지되었습니다.";
 const thumbnailBackgroundSize = { width: 1920, height: 1440 };
 const recentColorFamiliesStorageKey = "education-title-recent-color-families";
+const recentDesignSignaturesStorageKey = "education-title-recent-design-signatures";
 const maxRecentColorFamilies = 8;
+const maxRecentDesignSignatures = 12;
 const defaultRecolorOptions: RecolorOptions = {
   titleColors: true,
   iconColors: true,
@@ -335,19 +338,31 @@ export function GenerativeImageStudio() {
     updateField("manualPalette", { ...defaultManualPalette, ...manualPalette, ...updates });
   };
 
-  const generateCandidates = async () => {
+  const generateCandidates = async (mode: "standard" | "fresh" = "standard") => {
     if (isGenerating) {
       return;
     }
 
     try {
-      const preparedCandidateSet = candidateSet;
+      const isFreshDesign = mode === "fresh";
+      const preparedCandidateSet = isFreshDesign ? null : candidateSet;
       const canUsePreparedPalettes = Boolean(
         preparedCandidateSet && candidateList.every((candidate) => candidate.promptSet && !candidate.image)
       );
+      const recentDesignSignatures = Array.from(
+        new Set([
+          ...(isFreshDesign ? getCandidateDesignSignatures(candidateSet) : []),
+          ...getRecentDesignSignatures()
+        ])
+      ).slice(0, maxRecentDesignSignatures);
       const normalizedForm = normalizeForm(
-        { ...form, recentColorFamilies: getRecentColorFamilies() },
-        !canUsePreparedPalettes
+        {
+          ...form,
+          recentColorFamilies: getRecentColorFamilies(),
+          recentDesignSignatures,
+          designDNAOverrides: undefined
+        },
+        !canUsePreparedPalettes || isFreshDesign
       );
       validateForm(normalizedForm);
       runStartedAtRef.current = performance.now();
@@ -370,7 +385,9 @@ export function GenerativeImageStudio() {
       setProgressText(
         canUsePreparedPalettes
           ? "1/7 추천된 색상 후보로 꾸민 제목 1안과 2안을 만들고 있어요..."
-          : "1/7 꾸민 제목 1안과 2안을 만들고 있어요..."
+          : isFreshDesign
+            ? "1/7 최근 디자인과 겹치지 않는 새로운 Design DNA 2안을 만들고 있어요..."
+            : "1/7 교육 내용을 분석해 서로 다른 Design DNA 2안을 만들고 있어요..."
       );
 
       const promptStartedAt = performance.now();
@@ -402,7 +419,6 @@ export function GenerativeImageStudio() {
 
       addTiming(canUsePreparedPalettes ? "Palette recommendation reuse" : "Prompt analysis", performance.now() - promptStartedAt);
       setCandidateSet(nextCandidateSet);
-      rememberColorFamilies(getCandidateColorFamilies(nextCandidateSet));
 
       const draftStartedAt = performance.now();
       const candidateEntries = await Promise.all(
@@ -415,6 +431,7 @@ export function GenerativeImageStudio() {
               candidateId,
               result: {
                 ...initialCandidates()[candidateId],
+                direction: promptSetForCandidate.designSpec.variantDirection ?? initialCandidates()[candidateId].direction,
                 promptSet: promptSetForCandidate,
                 status: "success" as const,
                 image
@@ -425,6 +442,7 @@ export function GenerativeImageStudio() {
               candidateId,
               result: {
                 ...initialCandidates()[candidateId],
+                direction: promptSetForCandidate.designSpec.variantDirection ?? initialCandidates()[candidateId].direction,
                 promptSet: promptSetForCandidate,
                 status: "error" as const,
                 error: caught instanceof Error ? caught.message : `${candidateLabelMap[candidateId]} 생성에 실패했습니다.`
@@ -464,7 +482,20 @@ export function GenerativeImageStudio() {
     }
 
     try {
-      const normalizedForm = normalizeForm({ ...form, recentColorFamilies: getRecentColorFamilies() }, true);
+      const normalizedForm = normalizeForm(
+        {
+          ...form,
+          recentColorFamilies: getRecentColorFamilies(),
+          recentDesignSignatures: getRecentDesignSignatures(),
+          designDNAOverrides: candidateSet
+            ? {
+                "option-1": candidateSet.candidates["option-1"].designSpec.designDNA,
+                "option-2": candidateSet.candidates["option-2"].designSpec.designDNA
+              }
+            : undefined
+        },
+        true
+      );
       validateForm(normalizedForm);
       setForm(normalizedForm);
       setError("");
@@ -505,6 +536,8 @@ export function GenerativeImageStudio() {
       for (const candidateId of candidateOrder) {
         nextCandidates[candidateId] = {
           ...nextCandidates[candidateId],
+          direction:
+            nextCandidateSet.candidates[candidateId].designSpec.variantDirection ?? nextCandidates[candidateId].direction,
           promptSet: nextCandidateSet.candidates[candidateId],
           status: "idle"
         };
@@ -512,7 +545,6 @@ export function GenerativeImageStudio() {
 
       setCandidateSet(nextCandidateSet);
       setCandidates(nextCandidates);
-      rememberColorFamilies(getCandidateColorFamilies(nextCandidateSet));
       addTiming("Palette recommendation only", performance.now() - promptStartedAt);
       setFlowState("awaiting-selection");
       setProgressText("색상만 새로 추천했습니다. 마음에 드는 팔레트면 제목 시안 2안 생성하기를 눌러주세요.");
@@ -532,6 +564,7 @@ export function GenerativeImageStudio() {
     }
 
     rememberColorFamilies([candidate.promptSet.designSpec.paletteFamily ?? candidate.promptSet.designSpec.paletteLabel ?? ""]);
+    rememberDesignSignatures([getDesignSignature(candidate.promptSet)]);
     setError("");
     setSelectedCandidateId(candidateId);
     setPromptSet(candidate.promptSet);
@@ -622,7 +655,7 @@ export function GenerativeImageStudio() {
 
       setFlowState("generating-backgrounds");
       setProgressText("7/7 마지막으로 제목에 어울리는 썸네일 배경 2안을 만들고 있어요...");
-      const backgroundSpecs = getThumbnailBackgroundSpecs();
+      const backgroundSpecs = getThumbnailBackgroundSpecs(candidate.promptSet.designSpec.designDNA);
       setThumbnailBackgrounds(backgroundSpecs.map((spec) => ({ spec, status: "generating" })));
 
       const backgroundStartedAt = performance.now();
@@ -1312,7 +1345,7 @@ export function GenerativeImageStudio() {
                 className="rounded-lg bg-slate-950 px-4 py-3 text-sm font-extrabold text-white transition hover:bg-slate-700 disabled:cursor-wait disabled:opacity-60"
                 disabled={isGenerating}
                 type="button"
-                onClick={generateCandidates}
+                onClick={() => generateCandidates("standard")}
               >
                 {isGenerating && flowState === "generating-candidates"
                   ? "제목 시안 2안 생성 중..."
@@ -1325,6 +1358,14 @@ export function GenerativeImageStudio() {
                   {progressText}
                 </div>
               ) : null}
+              <button
+                className="rounded-lg border border-[#5F8F8B]/40 bg-[#F8F4EC] px-4 py-3 text-sm font-extrabold text-[#527d79] transition hover:border-[#5F8F8B] disabled:cursor-wait disabled:opacity-60"
+                disabled={isGenerating}
+                type="button"
+                onClick={() => generateCandidates("fresh")}
+              >
+                완전히 다른 스타일 2안
+              </button>
               <button
                 className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm font-extrabold text-slate-700 transition hover:border-[#5F8F8B] disabled:cursor-wait disabled:opacity-60"
                 disabled={isGenerating}
@@ -1924,6 +1965,8 @@ function CandidateCard({
   onRetry: () => void;
 }) {
   const canDownload = isValidTransparentImage(result.image);
+  const designDNA = result.promptSet?.designSpec.designDNA;
+  const direction = result.promptSet?.designSpec.variantDirection ?? result.direction;
 
   return (
     <article
@@ -1950,13 +1993,15 @@ function CandidateCard({
       <div className="space-y-3 p-4">
         <div>
           <p className="mb-1 inline-flex rounded-full bg-[#F8F4EC] px-2.5 py-1 text-[11px] font-black text-[#527d79]">
-            {result.direction}
+            {direction}
           </p>
           <h3 className="font-extrabold tracking-[-0.03em] text-slate-900">꾸민 제목 투명 PNG - {result.label}</h3>
           <p className="mt-1 text-xs font-bold leading-5 text-slate-400">
-            배경 투명 후처리 · 제목 중심 · 소량 장식 · high 품질 · {size}
+            배경 투명 후처리 · Design DNA 기반 · high 품질 · {size}
           </p>
         </div>
+
+        {designDNA ? <DesignDnaSummary dna={designDNA} compact /> : null}
 
         {result.image ? (
           <p className="text-xs font-bold text-slate-400">
@@ -1992,6 +2037,37 @@ function CandidateCard({
         </div>
       </div>
     </article>
+  );
+}
+
+function DesignDnaSummary({ dna, compact = false }: { dna: DesignDNA; compact?: boolean }) {
+  const items = [
+    ["스타일", dna.styleFamily],
+    ["구도", dna.composition],
+    ["타이포", dna.typography],
+    ["그래픽", dna.graphicLanguage],
+    ["밀도", dna.density],
+    ["강조", dna.emphasis]
+  ];
+
+  return (
+    <div className={`rounded-lg border border-slate-200 bg-slate-50/70 ${compact ? "p-2.5" : "p-3"}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs font-black text-slate-700">{dna.label}</p>
+        <p className="text-[11px] font-bold text-slate-400">{dna.mood}</p>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {items.map(([label, value]) => (
+          <span
+            key={`${label}-${value}`}
+            className="rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] font-extrabold text-slate-600"
+          >
+            {label} · {value}
+          </span>
+        ))}
+      </div>
+      {!compact ? <p className="mt-2 text-xs font-medium leading-5 text-slate-500">{dna.rationale}</p> : null}
+    </div>
   );
 }
 
@@ -2291,6 +2367,7 @@ function FinalResultCard({
 }) {
   const label = outputTypeLabelMap[result.outputType];
   const canDownload = isValidTransparentImage(result.image);
+  const designDNA = result.image?.prompt.designSpec.designDNA;
   const [detailsOpen, setDetailsOpen] = useState(false);
   const hasErrorDetails = Boolean(
     result.error || result.errorCode || result.errorParam || result.errorType || result.errorDetail || result.endpoint || result.openAIStatus
@@ -2323,6 +2400,8 @@ function FinalResultCard({
           <h3 className="font-extrabold tracking-[-0.03em] text-slate-900">{label}</h3>
           <p className="mt-1 text-xs font-bold leading-5 text-slate-400">{outputTypeDescriptionMap[result.outputType]}</p>
         </div>
+
+        {designDNA ? <DesignDnaSummary dna={designDNA} compact /> : null}
 
         {result.image ? (
           <p className="text-xs font-bold text-slate-400">
@@ -2614,9 +2693,15 @@ function PromptSummary({ promptSet, selectedLabel }: { promptSet: GeneratedPromp
 
       <div className="mt-4 grid gap-3 md:grid-cols-2">
         <InfoBlock label="핵심 정서 3개" value={promptSet.designSpec.coreEmotions.join(", ")} />
-        <InfoBlock label="핵심 키워드 5개" value={promptSet.designSpec.keywords.join(", ")} />
+        <InfoBlock label="핵심 키워드" value={promptSet.designSpec.keywords.join(", ")} />
+        <InfoBlock label="시각적 은유" value={promptSet.designSpec.visualMetaphor} />
         <InfoBlock label="실제 사용 아이콘 후보" value={promptSet.designSpec.decorations.join(", ")} />
         <InfoBlock label="줄바꿈" value={promptSet.designSpec.lineBreakPlan} />
+        <InfoBlock label="구도" value={promptSet.designSpec.titlePlacement} />
+      </div>
+
+      <div className="mt-4">
+        <DesignDnaSummary dna={promptSet.designSpec.designDNA} />
       </div>
 
       <div className="mt-4">
@@ -2886,22 +2971,33 @@ function markAllCandidates(status: ResultStatus): Record<CandidateId, CandidateR
   };
 }
 
-function getThumbnailBackgroundSpecs(): ThumbnailBackgroundSpec[] {
+function getThumbnailBackgroundSpecs(dna: DesignDNA): ThumbnailBackgroundSpec[] {
+  const focusByStyle: Record<DesignDNA["styleFamily"], string> = {
+    editorial: "editorial negative space, offset crop shapes, restrained contour lines, sophisticated asymmetry",
+    "bold-type": "strong open geometry, large quiet color fields, directional marks near edges, energetic hierarchy",
+    "hand-drawn": "loose marker-like edge doodles, organic lines, handmade rhythm, generous clean title safe area",
+    geometric: "modular grid fragments, small nodes, open squares, precise edge accents, clean central safe area",
+    sticker: "small cutout graphic fragments near corners, playful rounded shapes, controlled collage rhythm, clear title zone",
+    minimal: "large quiet negative space, one thin divider, tiny registration marks, restrained premium editorial feel",
+    diagram: "small flow nodes and connector lines near edges, process-like rhythm, spacious uncluttered title area",
+    experimental: "cropped abstract wedges, offset lines, asymmetrical directional energy, bold empty space for the title"
+  };
+
   return [
     {
       id: "thumbnail-background-1",
       label: "1안",
-      direction: "따뜻하고 부드러운 배경",
-      promptFocus: "warm airy organic background, soft curves, gentle connection lines, subtle dots near the edges",
-      fileLabel: "thumbnail_background_01_warm",
+      direction: `${dna.label} 확장 배경`,
+      promptFocus: focusByStyle[dna.styleFamily],
+      fileLabel: `thumbnail_background_01_${dna.styleFamily.replace(/[^a-z-]/g, "")}`,
       index: 0
     },
     {
       id: "thumbnail-background-2",
       label: "2안",
-      direction: "정돈되고 전문적인 배경",
-      promptFocus: "clean editorial background, balanced margins, refined geometric accents, calm professional rhythm",
-      fileLabel: "thumbnail_background_02_clean",
+      direction: `${dna.label}의 대비형 배경`,
+      promptFocus: `${focusByStyle[dna.styleFamily]}, but use a clearly different edge distribution and negative-space balance from variant 1`,
+      fileLabel: `thumbnail_background_02_${dna.styleFamily.replace(/[^a-z-]/g, "")}_contrast`,
       index: 1
     }
   ];
@@ -2932,6 +3028,8 @@ function normalizeForm(form: EducationImageForm, refreshStyle: boolean): Educati
     size: form.size,
     styleSeed: refreshStyle ? Date.now() : form.styleSeed || Date.now(),
     recentColorFamilies: (form.recentColorFamilies ?? []).filter(Boolean).slice(0, maxRecentColorFamilies),
+    recentDesignSignatures: (form.recentDesignSignatures ?? []).filter(Boolean).slice(0, maxRecentDesignSignatures),
+    designDNAOverrides: form.designDNAOverrides,
     manualPalette: form.manualPalette
   };
 }
@@ -3275,6 +3373,53 @@ function rememberColorFamilies(families: string[]) {
 
   const next = Array.from(new Set([...families.filter(Boolean), ...getRecentColorFamilies()])).slice(0, maxRecentColorFamilies);
   window.localStorage.setItem(recentColorFamiliesStorageKey, JSON.stringify(next));
+}
+
+function getRecentDesignSignatures() {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(recentDesignSignaturesStorageKey) ?? "[]");
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .filter((item): item is string => typeof item === "string" && item.length > 0)
+      .slice(0, maxRecentDesignSignatures);
+  } catch {
+    return [];
+  }
+}
+
+function rememberDesignSignatures(signatures: string[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const next = Array.from(new Set([...signatures.filter(Boolean), ...getRecentDesignSignatures()])).slice(
+    0,
+    maxRecentDesignSignatures
+  );
+  window.localStorage.setItem(recentDesignSignaturesStorageKey, JSON.stringify(next));
+}
+
+function getDesignSignature(promptSet: GeneratedPromptSet) {
+  const dna = promptSet.designSpec.designDNA;
+  return (
+    dna.noveltyKey ||
+    [dna.styleFamily, dna.composition, dna.typography, dna.graphicLanguage, dna.density, dna.emphasis, dna.shapeLanguage].join("|")
+  );
+}
+
+function getCandidateDesignSignatures(candidateSet: GeneratedCandidateSet | null) {
+  if (!candidateSet) {
+    return [];
+  }
+
+  return candidateOrder.map((candidateId) => getDesignSignature(candidateSet.candidates[candidateId]));
 }
 
 function getCandidateColorFamilies(candidateSet: GeneratedCandidateSet) {
